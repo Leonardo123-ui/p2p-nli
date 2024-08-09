@@ -10,16 +10,23 @@ from nltk.tokenize import word_tokenize
 # 下载punkt分词器模型（如果还没有下载过）
 # nltk.download('punkt')
 from transformers import BertModel, BertTokenizer
+from transformers import RobertaTokenizer, RobertaModel
 import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from data.DM_RST import *
 
 
+def load_all_data(data_processor, train_data_path):
+    train_data = data_processor.load_json(train_data_path)
+    rst_results = data_processor.get_rst(train_data)
+    return train_data, rst_results
+
+
 # 主要是获取处理后的数据，包括rst树的信息，以及节点的字符串表示和bert embeddings，以及词汇链信息
 class Data_Processor:
     def __init__(self, mode, save_dir, purpose):
-        self.save_dir = save_dir + purpose
+        self.save_dir = os.path.join(save_dir, purpose)
         self.rst_path = "rst_result.jsonl"
         self.save_or_not = mode
 
@@ -93,86 +100,122 @@ class Data_Processor:
         my_rst_tree = RST_Tree()
         model = my_rst_tree.init_model()  # 初始化模型
         precess_rst_tree = precess_rst_result()
-
+        batch_size = 100  # 设置批处理大小
         rst_results = []
-        new_data = []
-        for index, i in enumerate(data):
-            input_sentences, all_segmentation_pred, all_tree_parsing_pred = (
-                my_rst_tree.inference(model, [i["premise"], i["hypothesis"]])
-            )
-            if (
-                len(all_segmentation_pred[1]) < 2 or len(all_segmentation_pred[0]) < 2
-            ):  # hypo length < 2
-                print("jump", index)
-                continue
-            new_data.append(i)
-            segments_pre = precess_rst_tree.merge_strings(
-                input_sentences[0], all_segmentation_pred[0]
-            )  # 获取单个edu的string
-            segments_hyp = precess_rst_tree.merge_strings(
-                input_sentences[1], all_segmentation_pred[1]
-            )  # 获取单个edu的string
-            rst_info_pre = all_tree_parsing_pred[0][
-                0
-            ].split()  # 提取出rst结构，字符串形式
-            rst_info_hyp = all_tree_parsing_pred[1][
-                0
-            ].split()  # 提取出rst结构，字符串形式
-            node_number_pre, node_string_pre = precess_rst_tree.use_rst_info(
-                rst_info_pre, segments_pre
-            )  # 遍历RST信息，提取关系和标签信息
-            RelationAndNucleus_pre = precess_rst_tree.get_RelationAndNucleus(
-                rst_info_pre
-            )  # 提取核性和关系
-            node_number_hyp, node_string_hyp = precess_rst_tree.use_rst_info(
-                rst_info_hyp, segments_hyp
-            )  # 遍历RST信息，提取关系和标签信息
-            RelationAndNucleus_hyp = precess_rst_tree.get_RelationAndNucleus(
-                rst_info_hyp
-            )  # 提取核性和关系
+        for start in range(0, len(data), batch_size):
+            end = min(start + batch_size, len(data))
+            batch_data = data[start:end]
 
-            parent_dict_pre, leaf_node_pre, tree_pre = self.get_tree(node_number_pre)
-            parent_dict_hyp, leaf_node_hyp, tree_hyp = self.get_tree(node_number_hyp)
-            if i["label"] == "entailment":
-                numbered_label = 0
-            elif i["label"] == "not_entailment":
-                numbered_label = 1
-            else:
-                numbered_label = None
-                print("label is not in scale, please check", i["label"])
-            # rst_results.append({"pre_node_number": node_number_pre, "pre_node_string": node_string_pre, "pre_node_relations": RelationAndNucleus_pre, "pre_tree": tree_pre,"pre_leaf_node":leaf_node_pre,"pre_parent_dict":parent_dict_pre,
-            #                     "hyp_node_number": node_number_hyp, "hyp_node_string": node_string_hyp, "hyp_node_relations": RelationAndNucleus_hyp, "hyp_tree": tree_hyp,"hyp_leaf_node":leaf_node_hyp,"hyp_parent_dict":parent_dict_hyp,
-            #                     "label":i["label"]})
-            rst_results.append(
-                {
-                    "pre_node_number": node_number_pre,
-                    "pre_node_string": node_string_pre,
-                    "pre_node_relations": RelationAndNucleus_pre,
-                    "pre_tree": tree_pre,
-                    "pre_leaf_node": leaf_node_pre,
-                    "pre_parent_dict": parent_dict_pre,
-                    "hyp_node_number": node_number_hyp,
-                    "hyp_node_string": node_string_hyp,
-                    "hyp_node_relations": RelationAndNucleus_hyp,
-                    "hyp_tree": tree_hyp,
-                    "hyp_leaf_node": leaf_node_hyp,
-                    "hyp_parent_dict": parent_dict_hyp,
-                    "label": numbered_label,
-                }
-            )
-            # "pre_node_number":[[1,12,13,14]...]
-            # "pre_node_string":[["edu1-12","edu13-14"]...]
-            # "pre_node_relations":[{'nuc_left': 'Nucleus', 'nuc_right': 'Satellite', 'rel_left': 'span', 'rel_right': 'Topic-Comment'}...]
-            # "pre_tree":[[1,2],[1,3],[2,4]...]
-            # "pre_leaf_node":[8,12,13,14...]
-            # "pre_parent_dict":{"1_12":2, "13_14":3,""...}
-            # "label":0 or 1
+            # 批量构建输入句子列表
+            input_sentences = []
+            for item in batch_data:
+                input_sentences.append(item["premise"])
+                input_sentences.append(item["hypothesis"])
+            # 批量进行推理
+            (
+                input_sentences_batch,
+                all_segmentation_pred_batch,
+                all_tree_parsing_pred_batch,
+            ) = my_rst_tree.inference(model, input_sentences)
+
+            # new_data = []
+            for index, i in enumerate(batch_data):
+                # input_sentences, all_segmentation_pred, all_tree_parsing_pred = (
+                #     my_rst_tree.inference(model, [i["premise"], i["hypothesis"]])
+                # )
+
+                segments_pre = precess_rst_tree.merge_strings(
+                    input_sentences_batch[index * 2],
+                    all_segmentation_pred_batch[index * 2],
+                )  # 获取单个edu的string
+                segments_hyp = precess_rst_tree.merge_strings(
+                    input_sentences_batch[index * 2 + 1],
+                    all_segmentation_pred_batch[index * 2 + 1],
+                )  # 获取单个edu的string
+                if all_tree_parsing_pred_batch[index * 2][0] == "NONE":
+                    node_number_pre = 1
+                    node_string_pre = [segments_pre]
+                    RelationAndNucleus_pre = "NONE"
+                    tree_pre = [[1, 1]]
+                    leaf_node_pre = [1]
+                    parent_dict_pre = {"1_1": 1}
+                else:
+                    rst_info_pre = all_tree_parsing_pred[index * 2][
+                        0
+                    ].split()  # 提取出rst结构，字符串形式
+
+                    node_number_pre, node_string_pre = precess_rst_tree.use_rst_info(
+                        rst_info_pre, segments_pre
+                    )  # 遍历RST信息，提取关系和标签信息
+                    RelationAndNucleus_pre = precess_rst_tree.get_RelationAndNucleus(
+                        rst_info_pre
+                    )  # 提取核性和关系
+                    parent_dict_pre, leaf_node_pre, tree_pre = self.get_tree(
+                        node_number_pre
+                    )
+                if all_tree_parsing_pred[index * 2 + 1][0] == "NONE":
+                    node_number_hyp = 1
+                    node_string_hyp = [segments_hyp]
+                    RelationAndNucleus_hyp = "NONE"
+                    tree_hyp = [[1, 1]]
+                    leaf_node_hyp = [1]
+                    parent_dict_hyp = {"1_1": 1}
+                else:
+                    rst_info_hyp = all_tree_parsing_pred[index * 2 + 1][
+                        0
+                    ].split()  # 提取出rst结构，字符串形式
+                    node_number_hyp, node_string_hyp = precess_rst_tree.use_rst_info(
+                        rst_info_hyp, segments_hyp
+                    )  # 遍历RST信息，提取关系和标签信息
+                    RelationAndNucleus_hyp = precess_rst_tree.get_RelationAndNucleus(
+                        rst_info_hyp
+                    )  # 提取核性和关系
+                    parent_dict_hyp, leaf_node_hyp, tree_hyp = self.get_tree(
+                        node_number_hyp
+                    )
+                if i["label"] == "entailment":
+                    numbered_label = 0
+                elif i["label"] == "not_entailment":
+                    numbered_label = 1
+                else:
+                    numbered_label = None
+                    print("label is not in scale, please check", i["label"])
+                rst_results.append(
+                    {
+                        "pre_node_number": node_number_pre,
+                        "pre_node_string": node_string_pre,
+                        "pre_node_relations": RelationAndNucleus_pre,
+                        "pre_tree": tree_pre,
+                        "pre_leaf_node": leaf_node_pre,
+                        "pre_parent_dict": parent_dict_pre,
+                        "hyp_node_number": node_number_hyp,
+                        "hyp_node_string": node_string_hyp,
+                        "hyp_node_relations": RelationAndNucleus_hyp,
+                        "hyp_tree": tree_hyp,
+                        "hyp_leaf_node": leaf_node_hyp,
+                        "hyp_parent_dict": parent_dict_hyp,
+                        "label": numbered_label,
+                    }
+                )
+                # "pre_node_number":[[1,12,13,14]...]
+                # "pre_node_string":[["edu1-12","edu13-14"]...]
+                # "pre_node_relations":[{'nuc_left': 'Nucleus', 'nuc_right': 'Satellite', 'rel_left': 'span', 'rel_right': 'Topic-Comment'}...]
+                # "pre_tree":[[1,2],[1,3],[2,4]...]
+                # "pre_leaf_node":[8,12,13,14...]
+                # "pre_parent_dict":{"1_12":2, "13_14":3,""...}
+                # "label":0 or 1
+                # 如果没有rst结构，那么直接跳过，但是
 
         # save
         if self.save_or_not:
             os.makedirs(self.save_dir, exist_ok=True)
             self.write_jsonl(os.path.join(self.save_dir, self.rst_path), rst_results)
-
+        # 写入新的JSON文件,这个只需要第一次的时候运行
+        # print(len(new_data), "new data length,最后的数据长度")
+        # new_json_path = os.path.join(self.save_dir, "new_json.json")
+        # with open(new_json_path, "w", encoding="utf-8") as f:
+        #     json.dump(new_data, f, ensure_ascii=False, indent=4)
+        print(len(rst_results), "初步处理的rst results length")
         return rst_results
 
     def get_stored_rst(self, path):
@@ -182,15 +225,15 @@ class Data_Processor:
                 # 解析JSON字符串为字典
                 rst_dict = json.loads(line.strip())
                 rst_results.append(rst_dict)
-        print("got stored rst result")
+        print("got stored rst result from：", path)
         return rst_results
 
 
 class RSTEmbedder:
     def __init__(self, model_path, save_dir, purpose, save_or_not):
-        self.tokenizer = BertTokenizer.from_pretrained(model_path)
-        self.model = BertModel.from_pretrained(model_path)
-        self.save_dir_lexical = save_dir + purpose
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_path)
+        self.model = RobertaModel.from_pretrained(model_path)
+        self.save_dir_lexical = os.path.join(save_dir, purpose)
         self.save_or_not = save_or_not
         self.lexical_matrix_path = "lexical_matrixes.pkl"
 
@@ -262,38 +305,35 @@ class RSTEmbedder:
         data_to_save = []
 
         for rst_result in rst_results:
-            pre_leaf_node_string_list = rst_result["leaf_node_string_pre"]
-            # print(type(pre_leaf_node_string_list))
-            pre_leaf_node_index, pre_leaf_string = zip(*pre_leaf_node_string_list)
-            embeddings_premise = self.get_bert_embeddings(pre_leaf_string)
-            hyp_leaf_node_string_list = rst_result["leaf_node_string_hyp"]
-            hyp_leaf_node_index, hyp_leaf_string = zip(*hyp_leaf_node_string_list)
-            embeddings_hypothesis = self.get_bert_embeddings(hyp_leaf_string)
-            # # Process premise
-            # leaf_string_premise = []
-            # # child_node_list_premise = [x - 1 for x in rst_result["pre_leaf_node"]]  # -1
-            # child_node_list_premise = rst_result[
-            #     "pre_leaf_node"
-            # ]  # 这里是没有-1的，也就是是从1开始的
-            # print(child_node_list_premise)
-            # one_pre_string_premise = [
-            #     item for sublist in rst_result["pre_node_string"] for item in sublist
-            # ]
-            # for number in child_node_list_premise:
-            #     leaf_string_premise.append(
-            #         one_pre_string_premise[number - 2]
-            #     )  # -2的原因是root是虚拟的，而且上面child_node_list_premise从1开始的节点
-
-            # embeddings_premise = self.get_bert_embeddings(leaf_string_premise)
-            node_embeddings_premise = [
-                (node, embedding)  # 存的时候都是从0开始的了
-                for node, embedding in zip(pre_leaf_node_index, embeddings_premise)
-            ]
-
-            node_embeddings_hypothesis = [
-                (node, embedding)
-                for node, embedding in zip(hyp_leaf_node_index, embeddings_hypothesis)
-            ]
+            if rst_result["rst_relation_premise"] == ["NONE"]:
+                embeddings_premise = self.get_bert_embeddings(
+                    rst_result["leaf_node_string_pre"][0][1]
+                )  # debug check
+                node_embeddings_premise = [(1, embeddings_premise)]
+            else:
+                pre_leaf_node_string_list = rst_result["leaf_node_string_pre"]
+                # print(type(pre_leaf_node_string_list))
+                pre_leaf_node_index, pre_leaf_string = zip(*pre_leaf_node_string_list)
+                embeddings_premise = self.get_bert_embeddings(pre_leaf_string)
+                node_embeddings_premise = [
+                    (node, embedding)  # 存的时候都是从0开始的了
+                    for node, embedding in zip(pre_leaf_node_index, embeddings_premise)
+                ]
+            if rst_result["rst_relation_hypothesis"] == ["NONE"]:
+                embeddings_hypothesis = self.get_bert_embeddings(
+                    rst_result["leaf_node_string_hyp"][0][1]
+                )
+                node_embeddings_hypothesis = [(1, embeddings_hypothesis)]
+            else:
+                hyp_leaf_node_string_list = rst_result["leaf_node_string_hyp"]
+                hyp_leaf_node_index, hyp_leaf_string = zip(*hyp_leaf_node_string_list)
+                embeddings_hypothesis = self.get_bert_embeddings(hyp_leaf_string)
+                node_embeddings_hypothesis = [
+                    (node, embedding)
+                    for node, embedding in zip(
+                        hyp_leaf_node_index, embeddings_hypothesis
+                    )
+                ]
 
             data_to_save.append(
                 {
@@ -329,89 +369,109 @@ class RSTEmbedder:
             rst_relation_hypothesis = []
             premise_node_nuclearity = [(0, "root")]
             hypothesis_node_nuclearity = [(0, "root")]
-            # 记录叶子节点及其对应的字符串
-            pre_leaf_string, pre_leaf_node_index = self.find_leaf_node(
-                rst_result["pre_node_number"], rst_result["pre_node_string"]
-            )
-            if len(pre_leaf_string) != len(pre_leaf_node_index):
-                raise ValueError(
-                    "pre_leaf_string and pre_leaf_node_index must have the same length"
-                )
-            combined_list_pre = list(zip(pre_leaf_node_index, pre_leaf_string))
-            single_dict["leaf_node_string_pre"] = combined_list_pre
 
-            hyp_leaf_string, hyp_leaf_node_index = self.find_leaf_node(
-                rst_result["hyp_node_number"], rst_result["hyp_node_string"]
-            )
-            if len(hyp_leaf_string) != len(hyp_leaf_node_index):
-                raise ValueError(
-                    "hyp_leaf_string and hyp_leaf_node_index must have the same length"
-                )
-            combined_list_hyp = list(zip(hyp_leaf_node_index, hyp_leaf_string))
-            single_dict["leaf_node_string_hyp"] = combined_list_hyp
+            if rst_result["pre_node_number"] == 1:
+                premise_node_nuclearity.append((1, "single"))
+                single_dict["premise_node_nuclearity"] = premise_node_nuclearity
+                single_dict["rst_relation_premise"] = ["NONE"]
+                single_dict["pre_node_type"] = [1, 0]
+                single_dict["leaf_node_string_pre"] = [
+                    [1, rst_result["pre_node_string"][0]]
+                ]
+            else:
+                pre_leaf_string, pre_leaf_node_index = self.find_leaf_node(
+                    rst_result["pre_node_number"], rst_result["pre_node_string"]
+                )  # 记录叶子节点及其对应的字符串
+                if len(pre_leaf_string) != len(pre_leaf_node_index):
+                    raise ValueError(
+                        "pre_leaf_string and pre_leaf_node_index must have the same length"
+                    )
+                combined_list_pre = list(zip(pre_leaf_node_index, pre_leaf_string))
+                single_dict["leaf_node_string_pre"] = combined_list_pre
+                pre_rel = rst_result["pre_node_relations"]
+                pre_tree = rst_result["pre_tree"]
+                for index, item in enumerate(
+                    pre_rel
+                ):  # 对premise中的每个关系组进行分析，分别提取左右两个子树的关系，以及子节点的核心性
+                    rel_left = item["rel_left"]
+                    src_left = pre_tree[index * 2][0] - 1  # dgl的节点从0开始，所以要减1
+                    dst_left = pre_tree[index * 2][1] - 1
+                    node_nuclearity = item[
+                        "nuc_left"
+                    ]  # 只取目标节点的核心性，这样不会重复
+                    relation_1 = (src_left, dst_left, rel_left)
+                    node_nuclearity_1 = (dst_left, node_nuclearity)
+                    rst_relation_premise.append(relation_1)
+                    premise_node_nuclearity.append(node_nuclearity_1)
 
-            pre_rel = rst_result["pre_node_relations"]
-            pre_tree = rst_result["pre_tree"]
-            for index, item in enumerate(
-                pre_rel
-            ):  # 对premise中的每个关系组进行分析，分别提取左右两个子树的关系，以及子节点的核心性
-                rel_left = item["rel_left"]
-                src_left = pre_tree[index * 2][0] - 1  # dgl的节点从0开始，所以要减1
-                dst_left = pre_tree[index * 2][1] - 1
-                node_nuclearity = item["nuc_left"]  # 只取目标节点的核心性，这样不会重复
-                relation_1 = (src_left, dst_left, rel_left)
-                node_nuclearity_1 = (dst_left, node_nuclearity)
-                rst_relation_premise.append(relation_1)
-                premise_node_nuclearity.append(node_nuclearity_1)
+                    rst_right = item["rel_right"]
+                    src_right = pre_tree[index * 2 + 1][0] - 1
+                    dst_right = pre_tree[index * 2 + 1][1] - 1
+                    node_nuclearity = item["nuc_right"]
+                    relation_2 = (src_right, dst_right, rst_right)
+                    node_nuclearity_2 = (dst_right, node_nuclearity)
+                    rst_relation_premise.append(relation_2)
+                    premise_node_nuclearity.append(node_nuclearity_2)
 
-                rst_right = item["rel_right"]
-                src_right = pre_tree[index * 2 + 1][0] - 1
-                dst_right = pre_tree[index * 2 + 1][1] - 1
-                node_nuclearity = item["nuc_right"]
-                relation_2 = (src_right, dst_right, rst_right)
-                node_nuclearity_2 = (dst_right, node_nuclearity)
-                rst_relation_premise.append(relation_2)
-                premise_node_nuclearity.append(node_nuclearity_2)
-
-            pre_child_node_list = [x - 1 for x in rst_result["pre_leaf_node"]]
-            pre_node_type = [
-                0 if i in pre_child_node_list else 1 for i in range(len(pre_tree) + 1)
-            ]
-            single_dict["rst_relation_premise"] = rst_relation_premise
-            single_dict["premise_node_nuclearity"] = premise_node_nuclearity
-            single_dict["pre_node_type"] = pre_node_type
+                pre_child_node_list = [x - 1 for x in rst_result["pre_leaf_node"]]
+                pre_node_type = [
+                    0 if i in pre_child_node_list else 1
+                    for i in range(len(pre_tree) + 1)
+                ]
+                single_dict["rst_relation_premise"] = rst_relation_premise
+                single_dict["premise_node_nuclearity"] = premise_node_nuclearity
+                single_dict["pre_node_type"] = pre_node_type
 
             # 接下来处理hypothesis
-            hyp_rel = rst_result["hyp_node_relations"]
-            hyp_tree = rst_result["hyp_tree"]
-            for index, item in enumerate(
-                hyp_rel
-            ):  # 对hypothesis中的每个关系组进行分析，分别提取左右两个子树的关系，以及子节点的核心性
-                rel_left = item["rel_left"]
-                src_left = hyp_tree[index * 2][0] - 1  # dgl的节点从0开始，所以要减1
-                dst_left = hyp_tree[index * 2][1] - 1
-                node_nuclearity = item["nuc_left"]
-                relation_1 = (src_left, dst_left, rel_left)
-                node_nuclearity_1 = (dst_left, node_nuclearity)
-                rst_relation_hypothesis.append(relation_1)
-                hypothesis_node_nuclearity.append(node_nuclearity_1)
+            if rst_result["hyp_node_number"] == 1:
+                hypothesis_node_nuclearity.append((1, "single"))
+                single_dict["hypothesis_node_nuclearity"] = hypothesis_node_nuclearity
+                single_dict["rst_relation_hypothesis"] = ["NONE"]
+                single_dict["hyp_node_type"] = [1, 0]
+                single_dict["leaf_node_string_hyp"] = [
+                    [1, rst_result["hyp_node_string"][0]]
+                ]
+            else:
+                hyp_leaf_string, hyp_leaf_node_index = self.find_leaf_node(
+                    rst_result["hyp_node_number"], rst_result["hyp_node_string"]
+                )
+                if len(hyp_leaf_string) != len(hyp_leaf_node_index):
+                    raise ValueError(
+                        "hyp_leaf_string and hyp_leaf_node_index must have the same length"
+                    )
+                combined_list_hyp = list(zip(hyp_leaf_node_index, hyp_leaf_string))
+                single_dict["leaf_node_string_hyp"] = combined_list_hyp
+                hyp_rel = rst_result["hyp_node_relations"]
+                hyp_tree = rst_result["hyp_tree"]
+                for index, item in enumerate(
+                    hyp_rel
+                ):  # 对hypothesis中的每个关系组进行分析，分别提取左右两个子树的关系，以及子节点的核心性
+                    rel_left = item["rel_left"]
+                    src_left = hyp_tree[index * 2][0] - 1  # dgl的节点从0开始，所以要减1
+                    dst_left = hyp_tree[index * 2][1] - 1
+                    node_nuclearity = item["nuc_left"]
+                    relation_1 = (src_left, dst_left, rel_left)
+                    node_nuclearity_1 = (dst_left, node_nuclearity)
+                    rst_relation_hypothesis.append(relation_1)
+                    hypothesis_node_nuclearity.append(node_nuclearity_1)
 
-                rst_right = item["rel_right"]
-                src_right = hyp_tree[index * 2 + 1][0] - 1
-                dst_right = hyp_tree[index * 2 + 1][1] - 1
-                node_nuclearity = item["nuc_right"]
-                relation_2 = (src_right, dst_right, rst_right)
-                node_nuclearity_2 = (dst_right, node_nuclearity)
-                rst_relation_hypothesis.append(relation_2)
-                hypothesis_node_nuclearity.append(node_nuclearity_2)
+                    rst_right = item["rel_right"]
+                    src_right = hyp_tree[index * 2 + 1][0] - 1
+                    dst_right = hyp_tree[index * 2 + 1][1] - 1
+                    node_nuclearity = item["nuc_right"]
+                    relation_2 = (src_right, dst_right, rst_right)
+                    node_nuclearity_2 = (dst_right, node_nuclearity)
+                    rst_relation_hypothesis.append(relation_2)
+                    hypothesis_node_nuclearity.append(node_nuclearity_2)
 
-            hyp_child_node_list = [x - 1 for x in rst_result["hyp_leaf_node"]]
-            hyp_node_type = [
-                0 if i in hyp_child_node_list else 1 for i in range(len(hyp_tree) + 1)
-            ]
-            single_dict["rst_relation_hypothesis"] = rst_relation_hypothesis
-            single_dict["hypothesis_node_nuclearity"] = hypothesis_node_nuclearity
-            single_dict["hyp_node_type"] = hyp_node_type
+                hyp_child_node_list = [x - 1 for x in rst_result["hyp_leaf_node"]]
+                hyp_node_type = [
+                    0 if i in hyp_child_node_list else 1
+                    for i in range(len(hyp_tree) + 1)
+                ]
+                single_dict["rst_relation_hypothesis"] = rst_relation_hypothesis
+                single_dict["hypothesis_node_nuclearity"] = hypothesis_node_nuclearity
+                single_dict["hyp_node_type"] = hyp_node_type
 
             single_dict["label"] = str(rst_result["label"])
 
@@ -492,21 +552,77 @@ class RSTEmbedder:
 
 if __name__ == "__main__":
     # 调用示例
-    model_path = "/mnt/nlp/yuanmengying/models/bert-base-uncased"
-    rst_results_store_path = r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/rst_result.jsonl"  # 9988条训练数据
-    new_rst_results_store_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/new_rst_result.jsonl"
-    )
-    embeeding_store_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/node_embeddings.npz"
-    )
-    # Data_Processor = Data_Processor(True, rst_results_store_path)
-    embedder = RSTEmbedder(
-        model_path, "/mnt/nlp/yuanmengying/ymy/data/temp_data_", "dev", True
+    model_path = r"/mnt/nlp/yuanmengying/models/roberta-large"
+    # rst_results_store_path = r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/rst_result.jsonl"  # 9988条训练数据
+    # new_rst_results_store_path = (
+    #     r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/new_rst_result.jsonl"
+    # )
+    # embeeding_store_path = (
+    #     r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/node_embeddings.npz"
+    # )
+    overall_save_dir = r"/mnt/nlp/yuanmengying/ymy/data/processed_docnli_origin"
+    graph_infos_dir = r"/mnt/nlp/yuanmengying/ymy/data/graph_infos"
+
+    # train_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/new_train.json"
+    # dev_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/new_dev.json"
+    # test_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/new_test.json"
+    train_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/train.json"
+    dev_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/dev.json"
+    test_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/test.json"
+
+    # data_porcessor_train = Data_Processor(True, overall_save_dir, "train")
+    # data_processor_dev = Data_Processor(True, overall_save_dir, "dev")
+    data_processor_test = Data_Processor(True, overall_save_dir, "test")
+
+    # train_data, train_rst_result = load_all_data(data_porcessor_train, train_data_path)
+    # print("original train data length", len(train_data))
+    # dev_data, dev_rst_result = load_all_data(data_processor_dev, dev_data_path)
+    # print("original dev data length)", len(dev_data))
+    # test_data, test_rst_result = load_all_data(data_processor_test, test_data_path)
+    # print("original test data length", len(test_data))
+
+    # embedder_train = RSTEmbedder(model_path, graph_infos_dir, "train", True)
+    # embedder_dev = RSTEmbedder(model_path, graph_infos_dir, "dev", True)
+    embedder_test = RSTEmbedder(model_path, graph_infos_dir, "test", True)
+
+    # embedder_train.rewrite_rst_result(
+    #     os.path.join(overall_save_dir, "train", "rst_result.jsonl"),
+    #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
+    # )
+    # embedder_dev.rewrite_rst_result(
+    #     os.path.join(overall_save_dir, "dev", "rst_result.jsonl"),
+    #     os.path.join(overall_save_dir, "dev", "new_rst_result.jsonl"),
+    # )
+    embedder_test.rewrite_rst_result(
+        os.path.join(overall_save_dir, "test", "rst_result.jsonl"),
+        os.path.join(overall_save_dir, "test", "new_rst_result.jsonl"),
     )
 
-    embedder.rewrite_rst_result(rst_results_store_path, new_rst_results_store_path)
-    node_string_pairs = embedder.get_node_string_pair(
-        new_rst_results_store_path, embeeding_store_path
+    # train_node_string_pairs = embedder_train.get_node_string_pair(
+    #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
+    #     os.path.join(overall_save_dir, "train", "node_embeddings.npz"),
+    # )
+    # dev_node_string_pairs = embedder_dev.get_node_string_pair(
+    #     os.path.join(overall_save_dir, "dev", "new_rst_result.jsonl"),
+    #     os.path.join(overall_save_dir, "dev", "node_embeddings.npz"),
+    # )
+    test_node_string_pairs = embedder_test.get_node_string_pair(
+        os.path.join(overall_save_dir, "test", "new_rst_result.jsonl"),
+        os.path.join(overall_save_dir, "test", "node_embeddings.npz"),
     )
-    matrix = embedder.store_or_get_lexical_matrixes(new_rst_results_store_path)
+
+    # train_matrix = embedder_train.store_or_get_lexical_matrixes(
+    #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl")
+    # )
+    # dev_matrix = embedder_dev.store_or_get_lexical_matrixes(
+    #     os.path.join(overall_save_dir, "dev", "new_rst_result.jsonl")
+    # )
+    test_matrix = embedder_test.store_or_get_lexical_matrixes(
+        os.path.join(overall_save_dir, "test", "new_rst_result.jsonl")
+    )
+
+    # embedder.rewrite_rst_result(rst_results_store_path, new_rst_results_store_path)
+    # node_string_pairs = embedder.get_node_string_pair(
+    #     new_rst_results_store_path, embeeding_store_path
+    # )
+    # matrix = embedder.store_or_get_lexical_matrixes(new_rst_results_store_path)
