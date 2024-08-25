@@ -6,7 +6,7 @@ from build_base_graph import HeteroClassifier
 
 
 def train(
-    dataloader, model, dev_dataloader, epochs=3, lr=0.01, save_path="best_model.pth"
+    dataloader, model, dev_dataloader, epochs=10, lr=0.01, save_path="best_model.pth"
 ):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = torch.nn.CrossEntropyLoss()
@@ -99,17 +99,13 @@ def test(dataloader, model):
 if __name__ == "__main__":
     # 加载数据和模型
     batch_size = 100
-    train_save_dir = "/mnt/nlp/yuanmengying/ymy/data/graph_pairs/train"
-    dev_save_dir = "/mnt/nlp/yuanmengying/ymy/data/graph_pairs/dev"
-    test_save_dir = "/mnt/nlp/yuanmengying/ymy/data/graph_pairs/test"
-    train_rst_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_train/new_rst_result.jsonl"
-    )
-    train_lexical_chains_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_train/lexical_matrixes.pkl"
-    )
+    train_save_dir = "/mnt/nlp/yuanmengying/ymy/data/graph_pairs/train/graph_pairs.bin"
+    dev_save_dir = "/mnt/nlp/yuanmengying/ymy/data/graph_pairs/dev/graph_pairs.bin"
+    test_save_dir = "/mnt/nlp/yuanmengying/ymy/data/graph_pairs/test/graph_pairs.bin"
+    train_rst_path = r"/mnt/nlp/yuanmengying/ymy/data/processed_docnli_origin/train/new_rst_result.jsonl"
+    train_lexical_chains_path = r"/mnt/nlp/yuanmengying/ymy/data/graph_infos/train"
     train_embedding_file = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_train/node_embeddings.npz"
+        r"/mnt/nlp/yuanmengying/ymy/data/processed_docnli_origin/train"
     )
 
     train_dataloader = create_dataloader(
@@ -119,13 +115,10 @@ if __name__ == "__main__":
         train_save_dir,
         batch_size,
     )
-    dev_rst_path = r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/new_rst_result.jsonl"
-    dev_lexical_chains_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/lexical_matrixes.pkl"
-    )
-    dev_embedding_file = (
-        r"/mnt/nlp/yuanmengying/ymy/data/temp_data_dev/node_embeddings.npz"
-    )
+    print("process dev data")
+    dev_rst_path = r"/mnt/nlp/yuanmengying/ymy/data/processed_docnli_origin/dev/new_rst_result.jsonl"
+    dev_lexical_chains_path = r"/mnt/nlp/yuanmengying/ymy/data/graph_infos/dev"
+    dev_embedding_file = r"/mnt/nlp/yuanmengying/ymy/data/processed_docnli_origin/dev"
     dev_dataloader = create_dataloader(
         dev_rst_path,
         dev_lexical_chains_path,

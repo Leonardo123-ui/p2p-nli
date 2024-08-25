@@ -3,6 +3,7 @@ import torch
 import pickle
 import dgl
 import os
+import numpy as np
 from torch.utils.data import Dataset
 from sklearn.preprocessing import LabelEncoder
 from dgl.dataloading import GraphDataLoader
@@ -12,11 +13,13 @@ from build_base_graph import build_graph
 def save_graph_pairs(graph_pairs, file_path):
     graphs = [graph for pair in graph_pairs for graph in pair]
     dgl.save_graphs(file_path, graphs)
+    print("saved pair graph at", file_path)
 
 
 def load_graph_pairs(file_path, num_pairs):
     graphs, _ = dgl.load_graphs(file_path)
     graph_pairs = [(graphs[i * 2], graphs[i * 2 + 1]) for i in range(num_pairs)]
+    print("load from ", file_path)
     return graph_pairs
 
 
@@ -28,18 +31,34 @@ def extract_node_features(embeddings_data, idx, prefix):
     return node_features
 
 
+def load_embeddings_from_directory(directory_path):
+    embeddings_list = []
+    # 遍历目录中的所有文件
+    for filename in os.listdir(directory_path):
+
+        if filename.endswith(".npz"):
+            # 构建完整的文件路径
+            file_path = os.path.join(directory_path, filename)
+            print("emb file path:", file_path)
+            # 使用 torch.load 加载每个文件中的嵌入
+            embeddings = torch.load(file_path)
+            embeddings_list.extend(embeddings)
+
+    return embeddings_list
+
+
 # 定义 RSTDataset 类
 class RSTDataset(Dataset):
     def __init__(self, rst_path, lexical_chains_path, embedding_file, graph_pair_path):
         self.rst_path = rst_path
         self.lexical_chains_path = lexical_chains_path
-        self.node_embeddings = torch.load(embedding_file)
+        # self.node_embeddings = torch.load(embedding_file)
+        self.node_embeddings = load_embeddings_from_directory(embedding_file)
         self.data, self.label_encoder = self.load_data()
         self.graph_pair_path = graph_pair_path
-        os.makedirs(graph_pair_path, exist_ok=True)
-        if os.path.exists(graph_pair_path):
+        if not os.path.exists(self.graph_pair_path):
             self.save_all_graph_pairs()
-        self.graph_pairs = load_graph_pairs(graph_pair_path, len(self.data))
+        self.graph_pairs = load_graph_pairs(self.graph_pair_path, len(self.data))
 
     def save_all_graph_pairs(self):
         graph_pairs = []
@@ -51,10 +70,7 @@ class RSTDataset(Dataset):
             rst_relations_premise = rst_result["rst_relation_premise"]
             node_types_premise = rst_result["pre_node_type"]
             g_premise = build_graph(
-                node_features_premise,
-                node_types_premise,
-                rst_relations_premise,
-                self.relation_types,
+                node_features_premise, node_types_premise, rst_relations_premise
             )
 
             node_features_hypothesis = extract_node_features(
@@ -66,12 +82,11 @@ class RSTDataset(Dataset):
                 node_features_hypothesis,
                 node_types_hypothesis,
                 rst_relations_hypothesis,
-                self.relation_types,
             )
 
             graph_pairs.append((g_premise, g_hypothesis))
 
-        save_graph_pairs(graph_pairs, self.save_path)
+        save_graph_pairs(graph_pairs, self.graph_pair_path)
 
     def load_data(self):
         data = []
@@ -88,9 +103,16 @@ class RSTDataset(Dataset):
         print("Got stored RST results")
 
         # 读取词汇链数据
-        with open(self.lexical_chains_path, "rb") as f:
-            lexical_chains = pickle.load(f)
-
+        if os.path.isfile(self.lexical_chains_path):
+            with open(self.lexical_chains_path, "rb") as f:
+                lexical_chains = pickle.load(f)
+        elif os.path.isdir(self.lexical_chains_path):
+            for filename in os.listdir(self.lexical_chains_path):
+                if filename.endswith(".pkl"):
+                    file_path = os.path.join(self.lexical_chains_path, filename)
+                    data = pickle.load(open(file_path, "rb"))
+                    lexical_chains.append(data)
+                    print("get lexical chains from", file_path)
         # 标签编码
         label_encoder = LabelEncoder()
         label_encoder.fit(labels)

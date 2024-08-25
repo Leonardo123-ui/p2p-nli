@@ -5,7 +5,6 @@ import nltk
 import os
 import pickle
 import nltk
-import glob
 from nltk.tokenize import word_tokenize
 
 # 下载punkt分词器模型（如果还没有下载过）
@@ -20,9 +19,7 @@ from data.DM_RST import *
 
 def load_all_data(data_processor, train_data_path):
     train_data = data_processor.load_json(train_data_path)
-    train_data = (
-        train_data[920000:920958] + train_data[920959:927204] + train_data[927205:927285] + train_data[927286:]
-    )
+    train_data = train_data[151500:155000]
     rst_results = data_processor.get_rst(train_data)
     return train_data, rst_results
 
@@ -104,121 +101,108 @@ class Data_Processor:
         my_rst_tree = RST_Tree()
         model = my_rst_tree.init_model()  # 初始化模型
         precess_rst_tree = precess_rst_result()
-        batch_size = 1000  # 设置批处理大小
         rst_results = []
-        count = 920000
-        for start in range(0, len(data), batch_size):
-            end = min(start + batch_size, len(data))
-            batch_data = data[start:end]
+        count = 151500
 
-            # 批量构建输入句子列表
-            input_sentences = []
-            for item in batch_data:
-                input_sentences.append(item["premise"])
-                input_sentences.append(item["hypothesis"])
+        for index, i in enumerate(data):
+            if index == 285:
+                print("the 151785 data", i)
+                count += 1
+                continue
+            input_sentences, all_segmentation_pred, all_tree_parsing_pred = (
+                my_rst_tree.inference(model, [i["premise"], i["hypothesis"]])
+            )
 
-            # 批量进行推理
-            (
-                input_sentences_batch,
-                all_segmentation_pred_batch,
-                all_tree_parsing_pred_batch,
-            ) = my_rst_tree.inference(model, input_sentences)
-
-            # new_data = []
-            for index, i in enumerate(batch_data):
-                segments_pre = precess_rst_tree.merge_strings(
-                    input_sentences_batch[index * 2],
-                    all_segmentation_pred_batch[index * 2],
-                )  # 获取单个edu的string
-                segments_hyp = precess_rst_tree.merge_strings(
-                    input_sentences_batch[index * 2 + 1],
-                    all_segmentation_pred_batch[index * 2 + 1],
-                )  # 获取单个edu的string
-
-                if all_tree_parsing_pred_batch[index * 2][0] == "NONE":
-                    node_number_pre = 1
-                    node_string_pre = [segments_pre]
-                    RelationAndNucleus_pre = "NONE"
-                    tree_pre = [[1, 1]]
-                    leaf_node_pre = [1]
-                    parent_dict_pre = {"1_1": 1}
-                else:
-                    rst_info_pre = all_tree_parsing_pred_batch[index * 2][
-                        0
-                    ].split()  # 提取出rst结构，字符串形式
-
-                    node_number_pre, node_string_pre = precess_rst_tree.use_rst_info(
-                        rst_info_pre, segments_pre
-                    )  # 遍历RST信息，提取关系和标签信息
-                    RelationAndNucleus_pre = precess_rst_tree.get_RelationAndNucleus(
-                        rst_info_pre
-                    )  # 提取核性和关系
-                    parent_dict_pre, leaf_node_pre, tree_pre = self.get_tree(
-                        node_number_pre
-                    )
-                if all_tree_parsing_pred_batch[index * 2 + 1][0] == "NONE":
-                    node_number_hyp = 1
-                    node_string_hyp = [segments_hyp]
-                    RelationAndNucleus_hyp = "NONE"
-                    tree_hyp = [[1, 1]]
-                    leaf_node_hyp = [1]
-                    parent_dict_hyp = {"1_1": 1}
-                else:
-                    rst_info_hyp = all_tree_parsing_pred_batch[index * 2 + 1][
-                        0
-                    ].split()  # 提取出rst结构，字符串形式
-                    node_number_hyp, node_string_hyp = precess_rst_tree.use_rst_info(
-                        rst_info_hyp, segments_hyp
-                    )  # 遍历RST信息，提取关系和标签信息
-                    RelationAndNucleus_hyp = precess_rst_tree.get_RelationAndNucleus(
-                        rst_info_hyp
-                    )  # 提取核性和关系
-                    parent_dict_hyp, leaf_node_hyp, tree_hyp = self.get_tree(
-                        node_number_hyp
-                    )
-                if i["label"] == "entailment":
-                    numbered_label = 0
-                elif i["label"] == "not_entailment":
-                    numbered_label = 1
-                else:
-                    numbered_label = None
-                    print("label is not in scale, please check", i["label"])
-                rst_results.append(
-                    {
-                        "pre_node_number": node_number_pre,
-                        "pre_node_string": node_string_pre,
-                        "pre_node_relations": RelationAndNucleus_pre,
-                        "pre_tree": tree_pre,
-                        "pre_leaf_node": leaf_node_pre,
-                        "pre_parent_dict": parent_dict_pre,
-                        "hyp_node_number": node_number_hyp,
-                        "hyp_node_string": node_string_hyp,
-                        "hyp_node_relations": RelationAndNucleus_hyp,
-                        "hyp_tree": tree_hyp,
-                        "hyp_leaf_node": leaf_node_hyp,
-                        "hyp_parent_dict": parent_dict_hyp,
-                        "label": numbered_label,
-                    }
+            segments_pre = precess_rst_tree.merge_strings(
+                input_sentences[0], all_segmentation_pred[0]
+            )  # 获取单个edu的string
+            segments_hyp = precess_rst_tree.merge_strings(
+                input_sentences[1], all_segmentation_pred[1]
+            )  # 获取单个edu的string
+            # 提取出rst结构，字符串形式
+            if all_tree_parsing_pred[0][0] == "NONE":
+                node_number_pre = 1
+                node_string_pre = [segments_pre]
+                RelationAndNucleus_pre = "NONE"
+                tree_pre = [[1, 1]]
+                leaf_node_pre = [1]
+                parent_dict_pre = {"1_1": 1}
+            else:
+                rst_info_pre = all_tree_parsing_pred[0][0].split()
+                node_number_pre, node_string_pre = precess_rst_tree.use_rst_info(
+                    rst_info_pre, segments_pre
+                )  # 遍历RST信息，提取关系和标签信息
+                RelationAndNucleus_pre = precess_rst_tree.get_RelationAndNucleus(
+                    rst_info_pre
+                )  # 提取核性和关系
+                parent_dict_pre, leaf_node_pre, tree_pre = self.get_tree(
+                    node_number_pre
                 )
-                print(count, "count")
-                count += 1  # 增加计数器
-                # 每5000条保存一次
-                if count % 5000 == 0:
-                    os.makedirs(self.save_dir, exist_ok=True)
-                    rst_name = str(count) + "_rst_result.jsonl"
-                    self.write_jsonl(os.path.join(self.save_dir, rst_name), rst_results)
-                    print(
-                        f"Saved {len(rst_results)} records to {os.path.join(self.save_dir, self.rst_path)}"
-                    )
-                    rst_results = []  # 清空列表以便下次使用
+            if all_tree_parsing_pred[1][0] == "NONE":
+                node_number_hyp = 1
+                node_string_hyp = [segments_hyp]
+                RelationAndNucleus_hyp = "NONE"
+                tree_hyp = [[1, 1]]
+                leaf_node_hyp = [1]
+                parent_dict_hyp = {"1_1": 1}
+            else:
+                rst_info_hyp = all_tree_parsing_pred[1][
+                    0
+                ].split()  # 提取出rst结构，字符串形式
+                node_number_hyp, node_string_hyp = precess_rst_tree.use_rst_info(
+                    rst_info_hyp, segments_hyp
+                )  # 遍历RST信息，提取关系和标签信息
+                RelationAndNucleus_hyp = precess_rst_tree.get_RelationAndNucleus(
+                    rst_info_hyp
+                )  # 提取核性和关系
+                parent_dict_hyp, leaf_node_hyp, tree_hyp = self.get_tree(
+                    node_number_hyp
+                )
+            if i["label"] == "entailment":
+                numbered_label = 0
+            elif i["label"] == "not_entailment":
+                numbered_label = 1
+            else:
+                numbered_label = None
+                print("label is not in scale, please check", i["label"])
+            rst_results.append(
+                {
+                    "pre_node_number": node_number_pre,
+                    "pre_node_string": node_string_pre,
+                    "pre_node_relations": RelationAndNucleus_pre,
+                    "pre_tree": tree_pre,
+                    "pre_leaf_node": leaf_node_pre,
+                    "pre_parent_dict": parent_dict_pre,
+                    "hyp_node_number": node_number_hyp,
+                    "hyp_node_string": node_string_hyp,
+                    "hyp_node_relations": RelationAndNucleus_hyp,
+                    "hyp_tree": tree_hyp,
+                    "hyp_leaf_node": leaf_node_hyp,
+                    "hyp_parent_dict": parent_dict_hyp,
+                    "label": numbered_label,
+                }
+            )
+            print(count, "count")
+            count += 1  # 增加计数器
+            # 每5000条保存一次
+            if count % 500 == 0:
+                os.makedirs(self.save_dir, exist_ok=True)
+                rst_name = str(count) + "_rst_result.jsonl"
+                self.write_jsonl(os.path.join(self.save_dir, rst_name), rst_results)
+                print(
+                    f"Saved {len(rst_results)} records to {os.path.join(self.save_dir, self.rst_path)}"
+                )
+                rst_results = []  # 清空列表以便下次使用
         # 循环结束后，保存剩余的结果
         if rst_results:
             os.makedirs(self.save_dir, exist_ok=True)
-            rst_name = str(count) + "left_rst_result.jsonl"
+            rst_name = "left_rst_result.jsonl"
             self.write_jsonl(os.path.join(self.save_dir, rst_name), rst_results)
             print(
                 f"Saved {len(rst_results)} records to {os.path.join(self.save_dir, self.rst_path)}"
             )
+        else:
+            print("No left records to save.")
             # "pre_node_number":[[1,12,13,14]...]
             # "pre_node_string":[["edu1-12","edu13-14"]...]
             # "pre_node_relations":[{'nuc_left': 'Nucleus', 'nuc_right': 'Satellite', 'rel_left': 'span', 'rel_right': 'Topic-Comment'}...]
@@ -228,12 +212,6 @@ class Data_Processor:
             # "label":0 or 1
             # 如果没有rst结构，那么直接跳过，但是
 
-        # save
-        # if self.save_or_not:
-        #     os.makedirs(self.save_dir, exist_ok=True)
-        #     self.write_jsonl(os.path.join(self.save_dir, self.rst_path), rst_results)
-
-        print(len(rst_results), "最后剩下的rst results length")
         return rst_results
 
     def get_stored_rst(self, path):
@@ -264,21 +242,12 @@ class RSTEmbedder:
                 file.write(json_record + "\n")
         print(f"Saved records to {path} successfully.")
 
-    def get_stored_rst(self, paths):
+    def get_stored_rst(self, path):
         rst_results = []
-        if isinstance(paths, list):
-            for path in paths:
-                with open(path, "r") as file:
-                    for line in file:
-                        rst_dict = json.loads(line.strip())
-                        rst_results.append(rst_dict)
-        elif isinstance(paths, str):
-            with open(paths, "r") as file:
-                for line in file:
-                    rst_dict = json.loads(line.strip())
-                    rst_results.append(rst_dict)
-                    # if len(rst_results) == 40:
-                    #     break
+        with open(path, "r") as file:
+            for line in file:
+                rst_dict = json.loads(line.strip())
+                rst_results.append(rst_dict)
         print("got stored rst result")
         return rst_results
 
@@ -303,49 +272,16 @@ class RSTEmbedder:
             raise Exception("No Leaf Node?!")
         return leaf_string, leaf_node_index
 
-    # def get_bert_embeddings(self, texts):
-    #     inputs = self.tokenizer(
-    #         texts, return_tensors="pt", truncation=True, padding=True
-    #     )
-    #     with torch.no_grad():
-    #         outputs = self.model(**inputs)
-    #     return outputs.last_hidden_state.mean(dim=1).numpy()
-    def get_bert_embeddings_in_batches(self, texts, batch_size):
-        embeddings = []
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.model.to(device)  # 将模型移动到 GPU:0
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
-            try:
-                inputs = self.tokenizer(
-                    batch_texts, return_tensors="pt", truncation=True, padding=True
-                )
-                inputs = {
-                    key: value.to(device) for key, value in inputs.items()
-                }  # 将输入数据移动到 GPU:0
-            except Exception as e:
-                print(f"Error tokenizing batch: {batch_texts}")
-                print(e)
-                exit()
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            batch_embeddings = (
-                outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-            )  # 将结果移回 CPU
-            embeddings.extend(batch_embeddings)
-        return embeddings
-
-    def save_embeddings_in_chunks(self, data_to_save, output_file, chunk_size=50000):
-        print("Saving embeddings in chunks...")
-        for i in range(0, len(data_to_save), chunk_size):
-            chunk = data_to_save[i : i + chunk_size]
-            chunk_file = f"{output_file}_chunk_{i // chunk_size}.pt"
-            torch.save(chunk, chunk_file)
-            print(f"Saved chunk {i // chunk_size} to {chunk_file}")
-        print("All chunks saved successfully.")
+    def get_bert_embeddings(self, texts):
+        inputs = self.tokenizer(
+            texts, return_tensors="pt", truncation=True, padding=True
+        )
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        return outputs.last_hidden_state.mean(dim=1).numpy()
 
     def get_node_string_pair(
-        self, rst_results_store_path, output_file="node_embeddings.npz", batch_size=64
+        self, rst_results_store_path, output_file="node_embeddings.npz"
     ):
         """获取每个节点的字符串表示和对应的bert embeddings`
 
@@ -362,138 +298,47 @@ class RSTEmbedder:
             key: node_string, value: bert embeddings
         """
         rst_results = self.get_stored_rst(rst_results_store_path)
-        print("new rst_results length", len(rst_results))
-        batch_size = batch_size
         data_to_save = []
 
-        # for index, rst_result in enumerate(rst_results):
-        #     print("index", index)  # debug check
-        #     if rst_result["rst_relation_premise"] == ["NONE"]:
-        #         embeddings_premise = self.get_bert_embeddings(
-        #             rst_result["leaf_node_string_pre"][0][1]
-        #         )  # debug check
-        #         node_embeddings_premise = [(1, embeddings_premise)]
-        #     else:
-        #         pre_leaf_node_string_list = rst_result["leaf_node_string_pre"]
-        #         # print(type(pre_leaf_node_string_list))
-        #         pre_leaf_node_index, pre_leaf_string = zip(*pre_leaf_node_string_list)
-        #         embeddings_premise = self.get_bert_embeddings(pre_leaf_string)
-        #         node_embeddings_premise = [
-        #             (node, embedding)  # 存的时候都是从0开始的了
-        #             for node, embedding in zip(pre_leaf_node_index, embeddings_premise)
-        #         ]
-        #     if rst_result["rst_relation_hypothesis"] == ["NONE"]:
-        #         embeddings_hypothesis = self.get_bert_embeddings(
-        #             rst_result["leaf_node_string_hyp"][0][1]
-        #         )
-        #         node_embeddings_hypothesis = [(1, embeddings_hypothesis)]
-        #     else:
-        #         hyp_leaf_node_string_list = rst_result["leaf_node_string_hyp"]
-        #         hyp_leaf_node_index, hyp_leaf_string = zip(*hyp_leaf_node_string_list)
-        #         embeddings_hypothesis = self.get_bert_embeddings(hyp_leaf_string)
-        #         node_embeddings_hypothesis = [
-        #             (node, embedding)
-        #             for node, embedding in zip(
-        #                 hyp_leaf_node_index, embeddings_hypothesis
-        #             )
-        #         ]
-
-        #     data_to_save.append(
-        #         {
-        #             "premise": node_embeddings_premise,  # 这里的node_embeddings_premise是一个list，每个元素是一个tuple：（node,embedding)
-        #             "hypothesis": node_embeddings_hypothesis,  # 这里的node_embeddings_hypothesis是一个list，每个元素是一个tuple
-        #         }
-        #     )
-        # 将所有需要处理的文本分成两个列表
-        premise_texts = []
-        hypothesis_texts = []
-        premise_indices = []
-        hypothesis_indices = []
-
-        for index, rst_result in enumerate(rst_results):
-            print("index", index)  # debug check
-
+        for rst_result in rst_results:
             if rst_result["rst_relation_premise"] == ["NONE"]:
-                print(
-                    'type(rst_result["leaf_node_string_pre"]):',
-                    type(rst_result["leaf_node_string_pre"][0][1]),
-                )
-                premise_texts.append(str(rst_result["leaf_node_string_pre"][0][1]))
-                premise_indices.append([1])
+                embeddings_premise = self.get_bert_embeddings(
+                    rst_result["leaf_node_string_pre"][0][1]
+                )  # debug check
+                node_embeddings_premise = [(1, embeddings_premise)]
             else:
                 pre_leaf_node_string_list = rst_result["leaf_node_string_pre"]
+                # print(type(pre_leaf_node_string_list))
                 pre_leaf_node_index, pre_leaf_string = zip(*pre_leaf_node_string_list)
-                premise_texts.extend(pre_leaf_string)
-                premise_indices.append(pre_leaf_node_index)
-
+                embeddings_premise = self.get_bert_embeddings(pre_leaf_string)
+                node_embeddings_premise = [
+                    (node, embedding)  # 存的时候都是从0开始的了
+                    for node, embedding in zip(pre_leaf_node_index, embeddings_premise)
+                ]
             if rst_result["rst_relation_hypothesis"] == ["NONE"]:
-                hypothesis_texts.append(str(rst_result["leaf_node_string_hyp"][0][1]))
-                hypothesis_indices.append([1])
+                embeddings_hypothesis = self.get_bert_embeddings(
+                    rst_result["leaf_node_string_hyp"][0][1]
+                )
+                node_embeddings_hypothesis = [(1, embeddings_hypothesis)]
             else:
                 hyp_leaf_node_string_list = rst_result["leaf_node_string_hyp"]
                 hyp_leaf_node_index, hyp_leaf_string = zip(*hyp_leaf_node_string_list)
-                hypothesis_texts.extend(hyp_leaf_string)
-                hypothesis_indices.append(hyp_leaf_node_index)
-        # print(
-        #     len(premise_texts), len(hypothesis_texts), "premise_texts, hypothesis_texts"
-        # )
-        # print(
-        #     len(premise_indices),
-        #     len(hypothesis_indices),
-        #     "premise_indices, hypothesis_indices",
-        # )
-        # empty_indices = [
-        #     index for index, text in enumerate(premise_texts) if text == ""
-        # ]
-        # # 输出空字符串的位置
-        # if empty_indices:
-        #     print("空字符串的位置:", empty_indices)
-        # else:
-        #     print("列表中没有空字符串。")
-        # exit()
-        for index, text in enumerate(premise_texts):
-            if text == "":
-                premise_texts[index] = "EMPTY"
-                print("premise_texts", index)
-        for index, text in enumerate(hypothesis_texts):
-            if text == "":
-                hypothesis_texts[index] = "EMPTY"
-                print("hypothesis_texts", index)
-        # 批量获取嵌入
-        premise_embeddings = self.get_bert_embeddings_in_batches(
-            premise_texts, batch_size=64
-        )
-        hypothesis_embeddings = self.get_bert_embeddings_in_batches(
-            hypothesis_texts, batch_size=64
-        )
-
-        # 重新组织嵌入结果
-        premise_offset = 0
-        hypothesis_offset = 0
-
-        for i, rst_result in enumerate(rst_results):
-            print("in save", i)
-            node_embeddings_premise = [
-                (node, premise_embeddings[premise_offset + j])
-                for j, node in enumerate(premise_indices[i])
-            ]
-            premise_offset += len(premise_indices[i])
-
-            node_embeddings_hypothesis = [
-                (node, hypothesis_embeddings[hypothesis_offset + j])
-                for j, node in enumerate(hypothesis_indices[i])
-            ]
-            hypothesis_offset += len(hypothesis_indices[i])
+                embeddings_hypothesis = self.get_bert_embeddings(hyp_leaf_string)
+                node_embeddings_hypothesis = [
+                    (node, embedding)
+                    for node, embedding in zip(
+                        hyp_leaf_node_index, embeddings_hypothesis
+                    )
+                ]
 
             data_to_save.append(
                 {
-                    "premise": node_embeddings_premise,
-                    "hypothesis": node_embeddings_hypothesis,
+                    "premise": node_embeddings_premise,  # 这里的node_embeddings_premise是一个list，每个元素是一个tuple：（node,embedding)
+                    "hypothesis": node_embeddings_hypothesis,  # 这里的node_embeddings_hypothesis是一个list，每个元素是一个tuple
                 }
             )
-        print("get all embeddings")
-        self.save_embeddings_in_chunks(data_to_save, output_file)
-        # torch.save(data_to_save, output_file)
+
+        torch.save(data_to_save, output_file)
         print(f"Node embeddings saved to {output_file}")
         return data_to_save
 
@@ -501,7 +346,7 @@ class RSTEmbedder:
         data = torch.load(file_path)
         return data
 
-    def rewrite_rst_result(self, rst_results_store_paths, new_rst_results_store_path):
+    def rewrite_rst_result(self, rst_results_store_path, new_rst_results_store_path):
         """重写rst结果，将每个节点的核心性和关系分别提取出来，便于构建dgl图
 
         Parameters
@@ -512,7 +357,7 @@ class RSTEmbedder:
             新的rst结果存储路径
         """
 
-        rst_results = self.get_stored_rst(rst_results_store_paths)
+        rst_results = self.get_stored_rst(rst_results_store_path)
         new_rst_results = []
         for rst_result in rst_results:
             single_dict = {}
@@ -721,32 +566,27 @@ if __name__ == "__main__":
     dev_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/dev.json"
     test_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/test.json"
 
-    data_porcessor_train = Data_Processor(True, overall_save_dir, "train")
-    # data_processor_dev = Data_Processor(True, overall_save_dir, "dev")
+    # data_porcessor_train = Data_Processor(True, overall_save_dir, "train")
+    data_processor_dev = Data_Processor(True, overall_save_dir, "dev")
     # data_processor_test = Data_Processor(True, overall_save_dir, "test")
 
-    train_data, train_rst_result = load_all_data(data_porcessor_train, train_data_path)
-    print("original train data length", len(train_data))
-    # dev_data, dev_rst_result = load_all_data(data_processor_dev, dev_data_path)
-    # print("original dev data length)", len(dev_data))
+    # train_data, train_rst_result = load_all_data(data_porcessor_train, train_data_path)
+    # print("original train data length", len(train_data))
+    dev_data, dev_rst_result = load_all_data(data_processor_dev, dev_data_path)
+    print("original dev data length)", len(dev_data))
     # test_data, test_rst_result = load_all_data(data_processor_test, test_data_path)
     # print("original test data length", len(test_data))
 
-    embedder_train = RSTEmbedder(model_path, graph_infos_dir, "train", True)
-    # embedder_dev = RSTEmbedder(model_path, graph_infos_dir, "dev", True)
+    # embedder_train = RSTEmbedder(model_path, graph_infos_dir, "train", True)
+    embedder_dev = RSTEmbedder(model_path, graph_infos_dir, "dev", True)
     # embedder_test = RSTEmbedder(model_path, graph_infos_dir, "test", True)
-    train_rst_results_store_paths = glob.glob(
-        os.path.join(os.path.join(overall_save_dir, "train"), "*.jsonl")
-    )
-    print(len(train_rst_results_store_paths), "train_rst_results_store_paths")
-    embedder_train.rewrite_rst_result(
-        train_rst_results_store_paths,
-        os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
-    )
-    # dev_rst_results_store_paths = glob.glob(os.path.join(os.path.join(overall_save_dir, "dev"), '*.jsonl'))
-    # print(len(dev_rst_results_store_paths), "dev_rst_results_store_paths")
+
+    # embedder_train.rewrite_rst_result(
+    #     os.path.join(overall_save_dir, "train", "rst_result.jsonl"),
+    #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
+    # )
     # embedder_dev.rewrite_rst_result(
-    #     dev_rst_results_store_paths,
+    #     os.path.join(overall_save_dir, "dev", "rst_result.jsonl"),
     #     os.path.join(overall_save_dir, "dev", "new_rst_result.jsonl"),
     # )
     # embedder_test.rewrite_rst_result(
@@ -762,10 +602,10 @@ if __name__ == "__main__":
     #     os.path.join(overall_save_dir, "dev", "new_rst_result.jsonl"),
     #     os.path.join(overall_save_dir, "dev", "node_embeddings.npz"),
     # )
-    # test_node_string_pairs = embedder_test.get_node_string_pair(
-    #     os.path.join(overall_save_dir, "test", "new_rst_result.jsonl"),
-    #     os.path.join(overall_save_dir, "test", "node_embeddings.npz"),
-    # )
+    # # test_node_string_pairs = embedder_test.get_node_string_pair(
+    # #     os.path.join(overall_save_dir, "test", "new_rst_result.jsonl"),
+    # #     os.path.join(overall_save_dir, "test", "node_embeddings.npz"),
+    # # )
 
     # # train_matrix = embedder_train.store_or_get_lexical_matrixes(
     # #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl")
@@ -776,3 +616,9 @@ if __name__ == "__main__":
     # # test_matrix = embedder_test.store_or_get_lexical_matrixes(
     # #     os.path.join(overall_save_dir, "test", "new_rst_result.jsonl")
     # # )
+
+    # # embedder.rewrite_rst_result(rst_results_store_path, new_rst_results_store_path)
+    # # node_string_pairs = embedder.get_node_string_pair(
+    # #     new_rst_results_store_path, embeeding_store_path
+    # # )
+    # # matrix = embedder.store_or_get_lexical_matrixes(new_rst_results_store_path)

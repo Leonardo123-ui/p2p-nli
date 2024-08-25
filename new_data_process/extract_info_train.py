@@ -10,7 +10,6 @@ from nltk.tokenize import word_tokenize
 
 # 下载punkt分词器模型（如果还没有下载过）
 # nltk.download('punkt')
-from transformers import BertModel, BertTokenizer
 from transformers import RobertaTokenizer, RobertaModel
 import sys
 
@@ -21,7 +20,10 @@ from data.DM_RST import *
 def load_all_data(data_processor, train_data_path):
     train_data = data_processor.load_json(train_data_path)
     train_data = (
-        train_data[920000:920958] + train_data[920959:927204] + train_data[927205:927285] + train_data[927286:]
+        train_data[920000:920958]
+        + train_data[920959:927204]
+        + train_data[927205:927285]
+        + train_data[927286:]
     )
     rst_results = data_processor.get_rst(train_data)
     return train_data, rst_results
@@ -247,6 +249,20 @@ class Data_Processor:
         return rst_results
 
 
+from torch.utils.data import DataLoader, Dataset
+
+
+class TextDataset(Dataset):
+    def __init__(self, texts):
+        self.texts = texts
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        return self.texts[idx]
+
+
 class RSTEmbedder:
     def __init__(self, model_path, save_dir, purpose, save_or_not):
         self.tokenizer = RobertaTokenizer.from_pretrained(model_path)
@@ -310,29 +326,37 @@ class RSTEmbedder:
     #     with torch.no_grad():
     #         outputs = self.model(**inputs)
     #     return outputs.last_hidden_state.mean(dim=1).numpy()
+
     def get_bert_embeddings_in_batches(self, texts, batch_size):
         embeddings = []
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model.to(device)  # 将模型移动到 GPU:0
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
+
+        dataset = TextDataset(texts)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+        for batch_texts in dataloader:
+            print("in batch")
             try:
                 inputs = self.tokenizer(
                     batch_texts, return_tensors="pt", truncation=True, padding=True
                 )
-                inputs = {
-                    key: value.to(device) for key, value in inputs.items()
-                }  # 将输入数据移动到 GPU:0
+                inputs = {key: value.to(device) for key, value in inputs.items()}
             except Exception as e:
                 print(f"Error tokenizing batch: {batch_texts}")
                 print(e)
                 exit()
+
             with torch.no_grad():
                 outputs = self.model(**inputs)
-            batch_embeddings = (
-                outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-            )  # 将结果移回 CPU
+            # 检查输出
+            if outputs is not None and outputs.last_hidden_state is not None:
+                print("Shape of last_hidden_state:", outputs.last_hidden_state.shape)
+                batch_embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+            else:
+                print("outputs or last_hidden_state is None")
             embeddings.extend(batch_embeddings)
+
         return embeddings
 
     def save_embeddings_in_chunks(self, data_to_save, output_file, chunk_size=50000):
@@ -345,7 +369,7 @@ class RSTEmbedder:
         print("All chunks saved successfully.")
 
     def get_node_string_pair(
-        self, rst_results_store_path, output_file="node_embeddings.npz", batch_size=64
+        self, rst_results_store_path, output_file="node_embeddings.npz"
     ):
         """获取每个节点的字符串表示和对应的bert embeddings`
 
@@ -363,48 +387,8 @@ class RSTEmbedder:
         """
         rst_results = self.get_stored_rst(rst_results_store_path)
         print("new rst_results length", len(rst_results))
-        batch_size = batch_size
         data_to_save = []
 
-        # for index, rst_result in enumerate(rst_results):
-        #     print("index", index)  # debug check
-        #     if rst_result["rst_relation_premise"] == ["NONE"]:
-        #         embeddings_premise = self.get_bert_embeddings(
-        #             rst_result["leaf_node_string_pre"][0][1]
-        #         )  # debug check
-        #         node_embeddings_premise = [(1, embeddings_premise)]
-        #     else:
-        #         pre_leaf_node_string_list = rst_result["leaf_node_string_pre"]
-        #         # print(type(pre_leaf_node_string_list))
-        #         pre_leaf_node_index, pre_leaf_string = zip(*pre_leaf_node_string_list)
-        #         embeddings_premise = self.get_bert_embeddings(pre_leaf_string)
-        #         node_embeddings_premise = [
-        #             (node, embedding)  # 存的时候都是从0开始的了
-        #             for node, embedding in zip(pre_leaf_node_index, embeddings_premise)
-        #         ]
-        #     if rst_result["rst_relation_hypothesis"] == ["NONE"]:
-        #         embeddings_hypothesis = self.get_bert_embeddings(
-        #             rst_result["leaf_node_string_hyp"][0][1]
-        #         )
-        #         node_embeddings_hypothesis = [(1, embeddings_hypothesis)]
-        #     else:
-        #         hyp_leaf_node_string_list = rst_result["leaf_node_string_hyp"]
-        #         hyp_leaf_node_index, hyp_leaf_string = zip(*hyp_leaf_node_string_list)
-        #         embeddings_hypothesis = self.get_bert_embeddings(hyp_leaf_string)
-        #         node_embeddings_hypothesis = [
-        #             (node, embedding)
-        #             for node, embedding in zip(
-        #                 hyp_leaf_node_index, embeddings_hypothesis
-        #             )
-        #         ]
-
-        #     data_to_save.append(
-        #         {
-        #             "premise": node_embeddings_premise,  # 这里的node_embeddings_premise是一个list，每个元素是一个tuple：（node,embedding)
-        #             "hypothesis": node_embeddings_hypothesis,  # 这里的node_embeddings_hypothesis是一个list，每个元素是一个tuple
-        #         }
-        #     )
-        # 将所有需要处理的文本分成两个列表
         premise_texts = []
         hypothesis_texts = []
         premise_indices = []
@@ -434,23 +418,7 @@ class RSTEmbedder:
                 hyp_leaf_node_index, hyp_leaf_string = zip(*hyp_leaf_node_string_list)
                 hypothesis_texts.extend(hyp_leaf_string)
                 hypothesis_indices.append(hyp_leaf_node_index)
-        # print(
-        #     len(premise_texts), len(hypothesis_texts), "premise_texts, hypothesis_texts"
-        # )
-        # print(
-        #     len(premise_indices),
-        #     len(hypothesis_indices),
-        #     "premise_indices, hypothesis_indices",
-        # )
-        # empty_indices = [
-        #     index for index, text in enumerate(premise_texts) if text == ""
-        # ]
-        # # 输出空字符串的位置
-        # if empty_indices:
-        #     print("空字符串的位置:", empty_indices)
-        # else:
-        #     print("列表中没有空字符串。")
-        # exit()
+
         for index, text in enumerate(premise_texts):
             if text == "":
                 premise_texts[index] = "EMPTY"
@@ -461,10 +429,10 @@ class RSTEmbedder:
                 print("hypothesis_texts", index)
         # 批量获取嵌入
         premise_embeddings = self.get_bert_embeddings_in_batches(
-            premise_texts, batch_size=64
+            premise_texts, batch_size=128
         )
         hypothesis_embeddings = self.get_bert_embeddings_in_batches(
-            hypothesis_texts, batch_size=64
+            hypothesis_texts, batch_size=128
         )
 
         # 重新组织嵌入结果
@@ -491,10 +459,21 @@ class RSTEmbedder:
                     "hypothesis": node_embeddings_hypothesis,
                 }
             )
+            if i % 5000 == 0:
+                filename = output_file + str(i) + ".npz"
+                torch.save(data_to_save, filename)
+                data_to_save = []
+                print("5000 pairs saved")
+        if data_to_save:
+            filename = output_file + str(i) + ".npz"
+            torch.save(data_to_save, filename)
+
         print("get all embeddings")
-        self.save_embeddings_in_chunks(data_to_save, output_file)
-        # torch.save(data_to_save, output_file)
-        print(f"Node embeddings saved to {output_file}")
+
+        # print("get all embeddings")
+        # self.save_embeddings_in_chunks(data_to_save, output_file)
+        # # torch.save(data_to_save, output_file)
+        # print(f"Node embeddings saved to {output_file}")
         return data_to_save
 
     def load_embeddings(self, file_path):
@@ -721,12 +700,12 @@ if __name__ == "__main__":
     dev_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/dev.json"
     test_data_path = r"/mnt/nlp/yuanmengying/ymy/data/DocNLI_dataset/test.json"
 
-    data_porcessor_train = Data_Processor(True, overall_save_dir, "train")
+    # data_porcessor_train = Data_Processor(True, overall_save_dir, "train")
     # data_processor_dev = Data_Processor(True, overall_save_dir, "dev")
     # data_processor_test = Data_Processor(True, overall_save_dir, "test")
 
-    train_data, train_rst_result = load_all_data(data_porcessor_train, train_data_path)
-    print("original train data length", len(train_data))
+    # train_data, train_rst_result = load_all_data(data_porcessor_train, train_data_path)
+    # print("original train data length", len(train_data))
     # dev_data, dev_rst_result = load_all_data(data_processor_dev, dev_data_path)
     # print("original dev data length)", len(dev_data))
     # test_data, test_rst_result = load_all_data(data_processor_test, test_data_path)
@@ -735,14 +714,14 @@ if __name__ == "__main__":
     embedder_train = RSTEmbedder(model_path, graph_infos_dir, "train", True)
     # embedder_dev = RSTEmbedder(model_path, graph_infos_dir, "dev", True)
     # embedder_test = RSTEmbedder(model_path, graph_infos_dir, "test", True)
-    train_rst_results_store_paths = glob.glob(
-        os.path.join(os.path.join(overall_save_dir, "train"), "*.jsonl")
-    )
-    print(len(train_rst_results_store_paths), "train_rst_results_store_paths")
-    embedder_train.rewrite_rst_result(
-        train_rst_results_store_paths,
-        os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
-    )
+    # train_rst_results_store_paths = glob.glob(
+    #     os.path.join(os.path.join(overall_save_dir, "train"), "*.jsonl")
+    # )
+    # print(len(train_rst_results_store_paths), "train_rst_results_store_paths")
+    # embedder_train.rewrite_rst_result(
+    #     train_rst_results_store_paths,
+    #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
+    # )
     # dev_rst_results_store_paths = glob.glob(os.path.join(os.path.join(overall_save_dir, "dev"), '*.jsonl'))
     # print(len(dev_rst_results_store_paths), "dev_rst_results_store_paths")
     # embedder_dev.rewrite_rst_result(
@@ -754,10 +733,10 @@ if __name__ == "__main__":
     #     os.path.join(overall_save_dir, "test", "new_rst_result.jsonl"),
     # )
 
-    # # train_node_string_pairs = embedder_train.get_node_string_pair(
-    # #     os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
-    # #     os.path.join(overall_save_dir, "train", "node_embeddings.npz"),
-    # # )
+    train_node_string_pairs = embedder_train.get_node_string_pair(
+        os.path.join(overall_save_dir, "train", "new_rst_result.jsonl"),
+        os.path.join(overall_save_dir, "train", "node_embeddings.npz"),
+    )
     # dev_node_string_pairs = embedder_dev.get_node_string_pair(
     #     os.path.join(overall_save_dir, "dev", "new_rst_result.jsonl"),
     #     os.path.join(overall_save_dir, "dev", "node_embeddings.npz"),
