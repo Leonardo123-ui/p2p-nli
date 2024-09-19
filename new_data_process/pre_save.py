@@ -1,4 +1,4 @@
-from data_loader import RSTDataset
+from ymy.new_data_process.data_loader_old import RSTDataset
 
 train_rst_path = r"/mnt/nlp/yuanmengying/ymy/data/temp_data_train/new_rst_result.jsonl"
 train_lexical_chains_path = (

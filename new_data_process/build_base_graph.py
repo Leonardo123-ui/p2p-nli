@@ -42,6 +42,11 @@ def build_graph(node_features, node_types, rst_relations):
 
     # 创建从父节点到子节点及关系类型的映射
     parent_to_children = {}
+    if rst_relations == ["NONE"]:
+        rst_relations = [[0, 1, "span"]]
+    # print("rst_relations:", rst_relations)
+    # for rst_relation in rst_relations:
+    #     print("rst_relation:", rst_relation)
     for parent, child, rel_type in rst_relations:
         if parent not in parent_to_children:
             parent_to_children[parent] = []
@@ -92,8 +97,9 @@ def build_graph(node_features, node_types, rst_relations):
 
 
 def merge_graphs(g_premise, g_hypothesis, lexical_chain):
-    g_premise = g_premise.to(torch.device("cpu"))
-    g_hypothesis = g_hypothesis.to(torch.device("cpu"))
+    # 不要将图移动到CPU
+    # g_premise = g_premise.to(torch.device("cpu"))
+    # g_hypothesis = g_hypothesis.to(torch.device("cpu"))
 
     num_nodes_premise = g_premise.num_nodes()
     num_nodes_hypothesis = g_hypothesis.num_nodes()
@@ -154,7 +160,9 @@ def merge_graphs(g_premise, g_hypothesis, lexical_chain):
 
     # 复制节点特征
     combined_features = torch.zeros(
-        (num_combined_nodes, g_premise.ndata["feat"].shape[1]), dtype=torch.float32
+        (num_combined_nodes, g_premise.ndata["feat"].shape[1]),
+        dtype=torch.float32,
+        device=g_premise.device,
     )
     combined_features[:num_nodes_premise] = g_premise.ndata["feat"].clone().detach()
     combined_features[num_nodes_premise:] = g_hypothesis.ndata["feat"].clone().detach()
@@ -178,6 +186,9 @@ class RGCN(nn.Module):
 
     def forward(self, graph, inputs):
         # inputs是节点的特征
+        # for node_type, features in inputs.items():
+        #     print(f"Node type: {node_type}, Feature shape: {features.shape}")
+        # print("Graph:", graph)
         h = self.conv1(graph, inputs)
         h = {k: F.relu(v) for k, v in h.items()}
         h = self.conv2(graph, h)
@@ -192,7 +203,9 @@ class HeteroClassifier(nn.Module):
 
     def forward(self, g):
         h = {"node": g.ndata["feat"]}
-        h = self.rgcn(g, h)
+        h = self.rgcn(
+            g, h
+        )  # 这里是一个batch的图和节点特征 tempdev的h有【246, 768】其中246是节点数，768是特征数
         with g.local_scope():
             g.ndata["h"] = h["node"]
             # 通过平均读出值来计算单图的表征
