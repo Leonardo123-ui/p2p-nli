@@ -81,35 +81,65 @@ class RSTDataset(Dataset):
     def __init__(
         self,
         rst_path,
+        model_output_path,
+        model_output_emb_path,
         lexical_chains_dir,
         embeddings_dir,
-        batch_file_size=2,  # 每批处理的文件数量
+        batch_file_size=1,  # 每批处理的文件数量
+        save_dir="./graph_pairs",  # 保存 graph_pairs 的目录
     ):
         self.rst_path = rst_path
+        self.model_output_path = model_output_path
         self.lexical_chains_dir = lexical_chains_dir
         self.embeddings_dir = embeddings_dir
         self.batch_file_size = batch_file_size
+        self.save_dir = save_dir
+        self.model_output_emb_path = model_output_emb_path
 
-        # 获取所有文件的路径并排序
-        self.lexical_files = sorted(
-            [f for f in os.listdir(lexical_chains_dir) if f.endswith(".pkl")],
-            key=lambda x: int(re.search(r"\d+", x).group()),
-        )
-        self.embedding_files = sorted(
-            [f for f in os.listdir(embeddings_dir) if f.endswith(".npz")],
-            key=lambda x: int(re.search(r"\d+", x).group()),
-        )
+        # 确保保存目录存在
+        os.makedirs(self.save_dir, exist_ok=True)
 
-        assert len(self.lexical_files) == len(self.embedding_files), "文件数不匹配"
-        # 用于记录每个文件在 rst_result 中的全局索引偏移量
-        self.file_offsets = self.compute_file_offsets()
+        if os.path.exists(self.embeddings_dir):
+            print("embedding dir exists")
+            # 获取所有文件的路径并排序
+            self.data = self.load_rst_data()
+            self.model_output = self.load_model_output()
+            list_lexi = [
+                f for f in os.listdir(lexical_chains_dir) if f.endswith(".pkl")
+            ]
+            if len(list_lexi) == 1:
+                self.lexical_files = list_lexi
+            else:
+                self.lexical_files = sorted(
+                    [f for f in os.listdir(lexical_chains_dir) if f.endswith(".pkl")],
+                    key=lambda x: int(re.search(r"\d+", x).group()),
+                )
+            list_emb = [f for f in os.listdir(embeddings_dir) if f.endswith(".npz")]
+            if len(list_emb) == 1:
+                self.embedding_files = list_emb
+            else:
+                self.embedding_files = sorted(
+                    [f for f in os.listdir(embeddings_dir) if f.endswith(".npz")],
+                    key=lambda x: int(re.search(r"\d+", x).group()),
+                )
 
-        self.total_batches = len(self.lexical_files) // self.batch_file_size
-        if len(self.lexical_files) % self.batch_file_size != 0:
-            self.total_batches += 1
+            assert len(self.lexical_files) == len(self.embedding_files), "文件数不匹配"
+            # 用于记录每个文件在 rst_result 中的全局索引偏移量
+            self.file_offsets = self.compute_file_offsets()
 
-        self.data = self.load_rst_data()
+            self.total_batches = len(self.lexical_files) // self.batch_file_size
+            if len(self.lexical_files) % self.batch_file_size != 0:
+                self.total_batches += 1
+        else:
+            graph_pair_num = sorted(
+                [f for f in os.listdir(self.save_dir) if f.endswith(".pkl")],
+                key=lambda x: int(re.search(r"\d+", x).group()),
+            )
+            self.total_batches = len(graph_pair_num)
+            # self.total_batches = len(self.save_dir) // self.batch_file_size  #  len(self.save_dir）是路径名字的长度！！
+
         self.label_encoder = self.get_label_encoder()
+        self.hyp_emb = torch.load(self.model_output_emb_path)  # [(1,2,3),(),...]
         # 存储提前构建好的图，避免在训练时再构建
         self.graph_pairs = []
 
@@ -122,6 +152,7 @@ class RSTDataset(Dataset):
         current_offset = 0
         for filename in self.lexical_files:
             file_path = os.path.join(self.lexical_chains_dir, filename)
+            print(file_path)
             with open(file_path, "rb") as f:
                 lexical_chain = pickle.load(f)
                 file_length = len(lexical_chain)  # 获取当前文件的样本数
@@ -140,16 +171,38 @@ class RSTDataset(Dataset):
                 rst_results.append(rst_dict)
         return rst_results
 
+    def load_model_output(self):
+        """
+        加载模型输出，只需要加载一次。
+        """
+        with open(self.model_output_path, "r", encoding="utf-8") as file:
+            model_output = json.load(file)
+        return model_output
+
     def get_label_encoder(self):
-        labels = [rst["label"] for rst in self.data]
+        # labels = [rst["label"] for rst in self.data]
+        labels = ["0", "1", "2"]
         label_encoder = LabelEncoder()
         label_encoder.fit(labels)
         return label_encoder
 
     def load_batch_files(self, batch_num):
         """
-        根据批次号加载相应的词汇链和嵌入文件。
+        根据批次号加载相应的词汇链和嵌入文件，并构建图。
+        如果已存在保存的 graph_pairs 文件，则直接加载。
         """
+        # 保存的 graph_pairs 文件名
+        save_file = os.path.join(self.save_dir, f"graph_pairs_batch_{batch_num}.pkl")
+
+        # 如果文件已存在，直接加载
+        if os.path.isfile(save_file):
+            with open(save_file, "rb") as f:
+                self.graph_pairs = pickle.load(f)
+            logging.info("Loaded graph pairs from %s", save_file)
+            return
+
+        # 否则加载文件，构建图并保存
+
         start_idx = batch_num * self.batch_file_size
         end_idx = min((batch_num + 1) * self.batch_file_size, len(self.lexical_files))
 
@@ -157,7 +210,7 @@ class RSTDataset(Dataset):
         batch_embeddings = []
 
         # 加载词汇链
-        for i in range(start_idx, end_idx):
+        for i in range(start_idx, end_idx):  # (0, 1)
             lexical_file = os.path.join(self.lexical_chains_dir, self.lexical_files[i])
             with open(lexical_file, "rb") as f:
                 batch_lexical_chains.extend(pickle.load(f))
@@ -171,12 +224,18 @@ class RSTDataset(Dataset):
         rst_start_idx, rst_end_idx = self.file_offsets[batch_num]
         # 根据词汇链和嵌入构建图
         self.graph_pairs = self.build_graphs(
-            batch_lexical_chains, batch_embeddings, rst_start_idx, rst_end_idx
+            batch_lexical_chains,
+            batch_embeddings,
+            self.hyp_emb,
+            rst_start_idx,
+            rst_end_idx,
         )
 
-        # return batch_lexical_chains, batch_embeddings
+        # 保存构建的 graph_pairs
+        with open(save_file, "wb") as f:
+            pickle.dump(self.graph_pairs, f)
 
-    def build_graphs(self, lexical_chains, embeddings, start_idx, end_idx):
+    def build_graphs(self, lexical_chains, embeddings, hyp_emb, start_idx, end_idx):
         """
         根据加载的词汇链和嵌入构建图。
         """
@@ -184,7 +243,8 @@ class RSTDataset(Dataset):
         count = 0  # 计数器，用于batch embedding and lexical chain
         for idx in range(start_idx, end_idx):
             rst_result = self.data[idx]
-
+            # hypothesis_dict = self.model_output[idx]["model_output"]
+            hyp_emb_three = hyp_emb[idx]
             # 构建图
             node_features_premise = extract_node_features(embeddings, count, "premise")
             rst_relations_premise = rst_result["rst_relation_premise"]
@@ -205,7 +265,7 @@ class RSTDataset(Dataset):
             )
 
             graph_pairs.append(
-                (g_premise, g_hypothesis, lexical_chains[count], rst_result["label"])
+                (g_premise, g_hypothesis, lexical_chains[count], hyp_emb_three)
             )
             count += 1
 
@@ -215,54 +275,63 @@ class RSTDataset(Dataset):
         return len(self.graph_pairs)
 
     def __getitem__(self, idx):
-        g_premise, g_hypothesis, lexical_chain, label = self.graph_pairs[idx]
-        label = self.label_encoder.transform([label])[0]
-        return g_premise, g_hypothesis, lexical_chain, label
+        g_premise, g_hypothesis, lexical_chain, hyp_emb_three = self.graph_pairs[idx]
+        return g_premise, g_hypothesis, lexical_chain, hyp_emb_three
+        # entailment = hypothesis_dict["entailed hypothesis"]
+        # neutral = hypothesis_dict["neutral hypothesis"]
+        # contradiction = hypothesis_dict["contradictory hypothesis"]
+        # label0 = self.label_encoder.transform(["0"])[0]
+        # label1 = self.label_encoder.transform(["1"])[0]
+        # label2 = self.label_encoder.transform(["2"])[0]
 
 
-# def create_dataloader(
-#     rst_path,
-#     lexical_chains_dir,
-#     embedding_dir,
-#     batch_file_size=10,  # 每批加载的文件数量
-#     shuffle=True,
-# ):
-#     """
-#     按批次加载数据的 dataloader 函数。
-#     每次调用时按指定的文件批次加载数据。
-#     """
-#     dataset = RSTDataset(
-#         rst_path,
-#         lexical_chains_dir,
-#         embedding_dir,
-#         batch_file_size=batch_file_size,
-#     )
+if __name__ == "__main__":
+    batch_file_size = 1
+    # train_rst_path = r"/mnt/nlp/yuanmengying/ymy/data/cross_document/train/train1/new_rst_result.jsonl"
+    # model_output_path = (
+    #     r"/mnt/nlp/yuanmengying/nli_data_generate/sample_1_generated_hypothesis.json"
+    # )
+    # model_output_emb_path = r"/mnt/nlp/yuanmengying/ymy/data/cross_document/train/hyp/hypothesis_embeddings.npz"
+    # train_lexical_chains_path = (
+    #     r"/mnt/nlp/yuanmengying/ymy/data/cross_document/graph_infos/train"
+    # )
+    # train_embedding_file = r"/mnt/nlp/yuanmengying/ymy/data/cross_document/train/pre"
+    # train_pair_graph = (
+    #     r"/mnt/nlp/yuanmengying/ymy/data/cross_document/graph_pairs/train"
+    # )
+    # train_dataset = RSTDataset(
+    #     train_rst_path,
+    #     model_output_path,
+    #     model_output_emb_path,
+    #     train_lexical_chains_path,
+    #     train_embedding_file,
+    #     batch_file_size,
+    #     save_dir=train_pair_graph,
+    # )
+    # print(train_dataset.total_batches)
+    # for i in range(train_dataset.total_batches):
+    #     train_dataset.load_batch_files(i)
 
-#     return dataset  # 返回的是按批次加载的 dataset，而非 dataloader
-
-
-# def collate_fn(batch):
-#     """
-#     用于将一个批次的数据打包在一起。
-#     """
-#     g_premises, g_hypotheses, lexical_chains, labels = zip(*batch)
-#     return (
-#         list(g_premises),
-#         list(g_hypotheses),
-#         list(lexical_chains),
-#         torch.tensor(labels),
-#     )
-
-
-# if __name__ == "__main__":
-#     rst_path = "path/to/rst_file.json"
-#     lexical_chains_path = "path/to/lexical_chains.pkl"
-#     embedding_file = "path/to/embeddings"
-#     save_graph_pair = "path/to/save_graph_pairs.bin"
-
-#     dataloader = create_dataloader(
-#         rst_path, lexical_chains_path, embedding_file, save_graph_pair
-#     )
-#     for batch in dataloader:
-#         g_premises, g_hypotheses, lexical_chains, labels = batch
-#         print(labels)
+    dev_rst_path = (
+        r"/mnt/nlp/yuanmengying/ymy/data/cross_document/dev/dev1/new_rst_result.jsonl"
+    )
+    dev_model_output_path = (
+        r"/mnt/nlp/yuanmengying/nli_data_generate/sample_1_generated_hypothesis.json"
+    )
+    dev_model_output_emb_path = r"/mnt/nlp/yuanmengying/ymy/data/cross_document/dev/hyp/hypothesis_embeddings.npz"
+    dev_lexical_chains_path = (
+        r"/mnt/nlp/yuanmengying/ymy/data/cross_document/graph_infos/dev"
+    )
+    dev_embedding_file = r"/mnt/nlp/yuanmengying/ymy/data/cross_document/dev/pre"
+    dev_pair_graph = r"/mnt/nlp/yuanmengying/ymy/data/cross_document/graph_pairs/dev"
+    dev_dataset = RSTDataset(
+        dev_rst_path,
+        dev_model_output_path,
+        dev_model_output_emb_path,
+        dev_lexical_chains_path,
+        dev_embedding_file,
+        batch_file_size,
+        save_dir=dev_pair_graph,
+    )
+    for i in range(dev_dataset.total_batches):
+        dev_dataset.load_batch_files(i)
