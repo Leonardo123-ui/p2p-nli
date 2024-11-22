@@ -16,14 +16,11 @@ logging.basicConfig(
 @dataclass
 class DataPaths:
     rst_path: str
-    model_output_path: str
-    model_output_emb_path: str
-    evidence_text_output_path: str
-    lexical_chains_path: str
-    embedding_file: str
-    hyp_text_path: str
+    nli_data_path: str
+    pre_emb_path: str
+    hyp_emb_path: str
+    lexical_path: str
     pair_graph: str
-    labels_path: str
 
 
 class Config:
@@ -47,13 +44,13 @@ class Config:
 
         # 优化器相关配置
         self.warmup_ratio = kwargs.get("warmup_ratio", 0.1)
-        self.classifier_lr = kwargs.get("classifier_lr", 1e-4)
+        self.classifier_lr = kwargs.get("classifier_lr", 0.001)
         self.generator_lr = kwargs.get("generator_lr", 1e-5)
         self.total_steps = kwargs.get("total_steps", 1000)
         self.optimizer_type = kwargs.get("optimizer_type", "adamw")
         self.scheduler_type = kwargs.get("scheduler_type", "linear_warmup")
         self.device = kwargs.get(
-            "device", "cuda:2" if torch.cuda.is_available() else "cpu"
+            "device", torch.device("cuda" if torch.cuda.is_available() else "cpu")
         )
         # 模型配置
         self.model_config = kwargs.get(
@@ -72,8 +69,6 @@ class Config:
                     "Background",
                     "lexical",
                 ],
-                "model_name": "/mnt/nlp/yuanmengying/models/t5-small",
-                "device": self.device,
             },
         )
 
@@ -84,37 +79,52 @@ class Config:
         """初始化所有数据路径"""
         self.paths = {
             "train": DataPaths(
-                rst_path=f"{self.base_dir}/ymy/data/cross_document/train/train1/new_rst_result.jsonl",
-                model_output_path=f"{self.base_dir}/nli_data_generate/all_generated_hypothesis.json",
-                model_output_emb_path=f"{self.base_dir}/ymy/data/cross_document/train/hyp/hypothesis_embeddings.npz",
-                evidence_text_output_path=f"{self.base_dir}/ymy/data/cross_document/train/hyp/evidence_text.json",
-                lexical_chains_path=f"{self.base_dir}/ymy/data/cross_document/graph_infos/train",
-                embedding_file=f"{self.base_dir}/ymy/data/cross_document/11.1_graph_pairs/train/pre",
-                hyp_text_path=f"{self.base_dir}/ymy/data/cross_document/train/hyp/hypothesis_text.json",
-                pair_graph=f"{self.base_dir}/ymy/data/cross_document/graph_pairs_for_11.1/train",
-                labels_path="/mnt/nlp/yuanmengying/ymy/data/cross_document/train/pre/extractions_train_v3.json",
+                rst_path=(
+                    r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/train/train1/new_rst_result.jsonl"
+                ),
+                nli_data_path=(
+                    r"/mnt/nlp/yuanmengying/ymy/data/nli_type_data/v2/train_re_hyp.json"
+                ),
+                pre_emb_path=(
+                    "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/train/pre/node_embeddings.npz"
+                ),
+                hyp_emb_path=(
+                    "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/train/hyp/hyp_node_embeddings.npz"
+                ),
+                lexical_path="/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_infos/train/lexical_matrixes.npz",
+                pair_graph=r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_pairs/train",
             ),
             "dev": DataPaths(
-                rst_path=f"{self.base_dir}/ymy/data/cross_document/dev/dev1/new_rst_result.jsonl",
-                model_output_path=f"{self.base_dir}/nli_data_generate/valid_all_generated_hypothesis.json",
-                model_output_emb_path=f"{self.base_dir}/ymy/data/cross_document/dev/hyp/hypothesis_embeddings.npz",
-                evidence_text_output_path=f"{self.base_dir}/ymy/data/cross_document/dev/hyp/evidence_text.json",
-                lexical_chains_path=f"{self.base_dir}/ymy/data/cross_document/graph_infos/dev",
-                embedding_file=f"{self.base_dir}/ymy/data/cross_document/11.1_graph_pairs/dev/pre",
-                hyp_text_path=f"{self.base_dir}/ymy/data/cross_document/dev/hyp/hypothesis_text.json",
-                pair_graph=f"{self.base_dir}/ymy/data/cross_document/graph_pairs_for_11.1/dev",
-                labels_path="/mnt/nlp/yuanmengying/ymy/data/cross_document/dev/pre/extractions_dev_v2.json",
+                rst_path=(
+                    r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/dev/dev1/new_rst_result.jsonl"
+                ),
+                nli_data_path=(
+                    r"/mnt/nlp/yuanmengying/ymy/data/nli_type_data/v2/dev_re_hyp.json"
+                ),
+                pre_emb_path=(
+                    "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/dev/pre/node_embeddings.npz"
+                ),
+                hyp_emb_path=(
+                    "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/dev/hyp/hyp_node_embeddings.npz"
+                ),
+                lexical_path="/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_infos/dev/lexical_matrixes.npz",
+                pair_graph=r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_pairs/dev",
             ),
             "test": DataPaths(
-                rst_path=f"{self.base_dir}/ymy/data/cross_document/test/test1/new_rst_result.jsonl",
-                model_output_path=f"{self.base_dir}/nli_data_generate/test_all_generated_hypothesis.json",
-                model_output_emb_path=f"{self.base_dir}/ymy/data/cross_document/test/hyp/hypothesis_embeddings.npz",
-                evidence_text_output_path=f"{self.base_dir}/ymy/data/cross_document/test/hyp/evidence_text.json",
-                lexical_chains_path=f"{self.base_dir}/ymy/data/cross_document/graph_infos/test",
-                embedding_file=f"{self.base_dir}/ymy/data/cross_document/11.1_graph_pairs/test/pre",
-                hyp_text_path=f"{self.base_dir}/ymy/data/cross_document/test/hyp/hypothesis_text.json",
-                pair_graph=f"{self.base_dir}/ymy/data/cross_document/graph_pairs_for_11.1/test",
-                labels_path="/mnt/nlp/yuanmengying/ymy/data/cross_document/test/pre/extractions_test_v2.json",
+                rst_path=(
+                    r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/test/test1/new_rst_result.jsonl"
+                ),
+                nli_data_path=(
+                    r"/mnt/nlp/yuanmengying/ymy/data/nli_type_data/v2/test_re_hyp.json"
+                ),
+                pre_emb_path=(
+                    "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/test/pre/node_embeddings.npz"
+                ),
+                hyp_emb_path=(
+                    "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/test/hyp/hyp_node_embeddings.npz"
+                ),
+                lexical_path="/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_infos/test/lexical_matrixes.npz",
+                pair_graph=r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_pairs/test",
             ),
         }
 
@@ -147,13 +157,10 @@ def data_model_loader(device):
     logging.info("Processing train data")
     train_dataset = RSTDataset(
         config.paths["train"].rst_path,
-        config.paths["train"].model_output_path,
-        config.paths["train"].model_output_emb_path,
-        config.paths["train"].evidence_text_output_path,
-        config.paths["train"].lexical_chains_path,
-        config.paths["train"].embedding_file,
-        config.paths["train"].hyp_text_path,
-        config.paths["train"].labels_path,
+        config.paths["train"].nli_data_path,
+        config.paths["train"].pre_emb_path,
+        config.paths["train"].lexical_path,
+        config.paths["train"].hyp_emb_path,
         config.batch_file_size,
         save_dir=config.paths["train"].pair_graph,
     )
@@ -161,13 +168,10 @@ def data_model_loader(device):
     logging.info("Processing dev data")
     dev_dataset = RSTDataset(
         config.paths["dev"].rst_path,
-        config.paths["dev"].model_output_path,
-        config.paths["dev"].model_output_emb_path,
-        config.paths["dev"].evidence_text_output_path,
-        config.paths["dev"].lexical_chains_path,
-        config.paths["dev"].embedding_file,
-        config.paths["dev"].hyp_text_path,
-        config.paths["dev"].labels_path,
+        config.paths["dev"].nli_data_path,
+        config.paths["dev"].pre_emb_path,
+        config.paths["dev"].lexical_path,
+        config.paths["dev"].hyp_emb_path,
         config.batch_file_size,
         save_dir=config.paths["dev"].pair_graph,
     )
@@ -175,18 +179,15 @@ def data_model_loader(device):
     logging.info("Processing test data")
     test_dataset = RSTDataset(
         config.paths["test"].rst_path,
-        config.paths["test"].model_output_path,
-        config.paths["test"].model_output_emb_path,
-        config.paths["test"].evidence_text_output_path,
-        config.paths["test"].lexical_chains_path,
-        config.paths["test"].embedding_file,
-        config.paths["test"].hyp_text_path,
-        config.paths["test"].labels_path,
+        config.paths["test"].nli_data_path,
+        config.paths["test"].pre_emb_path,
+        config.paths["test"].lexical_path,
+        config.paths["test"].hyp_emb_path,
         config.batch_file_size,
         save_dir=config.paths["test"].pair_graph,
     )
     config.total_steps = (
-        train_dataset.file_offsets[0][1] // config.batch_size * config.epochs
+        666 // config.batch_size * config.epochs
     )  # data_loader的长度乘以epochs
     config.warmup_steps = int(config.total_steps * config.warmup_ratio)
     # 初始化模型

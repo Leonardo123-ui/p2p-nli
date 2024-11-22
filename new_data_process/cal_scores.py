@@ -164,12 +164,12 @@ def is_best_model(current_results, best_results, stage):
     if stage == "classification":
         current = current_results["classification_metrics"]["f1"]
     elif stage == "generation":
-        current = current_results["generation_sum_metrics"]["pair_bleu"]
+        current = current_results["generation_metrics"]["f1"]
     else:  # joint
         # 对于联合训练，可以使用加权组合
         current = (
-            current_results["classification_metrics"]["f1"] * 0.6
-            + current_results["generation_sum_metrics"]["pair_bleu"] * 0.4
+            current_results["classification_metrics"]["f1"] * 0.8
+            + current_results["generation_metrics"]["f1"] * 0.2
         )
 
     return current > best_results

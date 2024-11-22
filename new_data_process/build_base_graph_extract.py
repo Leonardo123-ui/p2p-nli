@@ -482,9 +482,9 @@ class ExplainableHeteroClassifier(nn.Module):
         self.query_proj = nn.Linear(in_dim, hidden_dim)
         self.key_proj = nn.Linear(in_dim, hidden_dim)
         self.value_proj = nn.Linear(in_dim, hidden_dim)
-        # 分类器
+        # nli分类器
         self.classifier = nn.Linear(hidden_dim * 2, n_classes)
-        # 节点级别的分类器
+        # edu级别的分类器
         self.node_classifier = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
@@ -528,69 +528,68 @@ class ExplainableHeteroClassifier(nn.Module):
         return logits
 
     def extract_explanation(self, graph, hyp_emb):
+        # 获取 RGAT 的节点特征和注意力权重
         node_feats, attention_weights = self.rgat_edu_labels(
             graph, {"node": graph.ndata["feat"]}, return_attention=True
         )
         batch_size = hyp_emb.size(0)
-        # 获取每个图的节点数量
-        graph_nodes = graph.batch_num_nodes()  # 返回每个图中节点的数量列表
+        graph_nodes = graph.batch_num_nodes()  # 每个图的节点数量 type:Tensor
         total_nodes = graph.num_nodes()  # 所有图的总节点数
 
-        # 投影特征
-        nodes = self.query_proj(node_feats["node"])  # [total_nodes, hidden_dim]
-        hyp = self.key_proj(hyp_emb)  # [batch_size, hidden_dim]
+        # 使用返回的 attention_weights 直接计算节点的重要性
+        node_importance = []
+        for etype, weights in attention_weights.items():
+            # 计算每个关系类型上的节点加权重要性
+            edge_importance = torch.zeros(total_nodes, device=weights.device)
+            for edge_idx, edge_weight in enumerate(weights):
+                src, dst = graph.edges(etype=etype)
+                edge_importance[dst[edge_idx]] += edge_weight.mean().item()
+            node_importance.append(edge_importance)
 
-        # 使用 graph_nodes 来构建节点到图的映射
-        node_graph_idx = torch.repeat_interleave(
-            torch.arange(batch_size, device=graph.device), graph_nodes
-        )  # [total_nodes]
-
-        # 扩展 hyp 以匹配对应的节点
-        hyp_expanded = hyp[node_graph_idx]  # [total_nodes, hidden_dim]
-
-        # 重塑为注意力机制需要的形状
-        # 将节点按照批次重组
-        nodes_split = torch.split(nodes, graph_nodes.tolist())
-        nodes_padded = torch.nn.utils.rnn.pad_sequence(nodes_split, batch_first=True)
-        # [batch_size, max_nodes, hidden_dim]
-
-        hyp_expanded_split = torch.split(hyp_expanded, graph_nodes.tolist())
-        hyp_padded = torch.nn.utils.rnn.pad_sequence(
-            hyp_expanded_split, batch_first=True
-        )
-        # [batch_size, max_nodes, hidden_dim]
-
-        # # 打印调试信息
-        # print(f"Nodes padded shape: {nodes_padded.shape}")
-        # print(f"Hyp padded shape: {hyp_padded.shape}")
-        # print(f"Graph nodes distribution: {graph_nodes}")
+        # 合并不同关系上的节点重要性
+        node_importance = sum(node_importance)  # size [total_nodes] type Tensor
+        # 按批次拆分节点重要性
+        node_importance_split = torch.split(
+            node_importance, graph_nodes.tolist()
+        )  # 按图拆分
+        node_importance_padded = torch.nn.utils.rnn.pad_sequence(
+            node_importance_split, batch_first=True
+        )  # [batch_size, max_nodes]
 
         # 创建注意力掩码
-        max_nodes = nodes_padded.size(1)
+        max_nodes = node_importance_padded.size(1)
         attention_mask = torch.zeros(
             batch_size, max_nodes, dtype=torch.bool, device=graph.device
         )
         for i, length in enumerate(graph_nodes):
             attention_mask[i, length:] = True
+        # 使用 hypothesis 对节点重要性进行加权
+        hyp_expanded = hyp_emb.unsqueeze(1).expand(
+            -1, max_nodes, -1
+        )  # [batch_size, max_nodes, hidden_dim]
+        node_feats_split = torch.split(node_feats["node"], graph_nodes.tolist())
+        node_feats_padded = torch.nn.utils.rnn.pad_sequence(
+            node_feats_split, batch_first=True
+        )  # [batch_size, max_nodes, hidden_dim]
 
-        # 应用注意力机制
+        # 使用注意力计算节点和 hypothesis 的交互特征
         attn_output, attn_weights = self.attention(
-            query=nodes_padded,
-            key=hyp_padded,
-            value=hyp_padded,
+            query=hyp_expanded,
+            key=node_feats_padded,
+            value=node_feats_padded,
             key_padding_mask=attention_mask,
-        )  # attn_output: [batch_size, max_nodes, hidden_dim]
+        )  # [batch_size, max_nodes, hidden_dim]
 
-        # 移除填充并展平回原始形状
-        attn_output_list = []
-        for i, length in enumerate(graph_nodes):
-            attn_output_list.append(attn_output[i, :length])
-        attn_output = torch.cat(attn_output_list, dim=0)  # [total_nodes, hidden_dim]
+        # 合并重要性特征与交互特征
+        combined_features = torch.cat([node_feats_padded, attn_output], dim=-1)
+        combined_features_split = [
+            combined_features[i, : graph_nodes[i]] for i in range(batch_size)
+        ]
+        combined_features = torch.cat(
+            combined_features_split, dim=0
+        )  # [total_nodes, hidden_dim * 2]
 
-        # 合并特征
-        combined_features = torch.cat([node_feats["node"], attn_output], dim=-1)
-
-        # 生成节点的分类logits
+        # 生成节点分类 logits
         node_logits = self.node_classifier(combined_features)
 
-        return node_logits, attn_weights
+        return node_logits, attention_weights

@@ -38,7 +38,7 @@ import torch.multiprocessing as mp
 import os
 
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 criterion = torch.nn.CrossEntropyLoss()
 
 rel_names_short = [
@@ -301,13 +301,11 @@ class TrainingConfig:
 
 def collate_fn(batch):
     (
-        g_premises,
-        g_hypotheses,
+        g_premise,
+        g_premise2,
         lexical_chains,
-        hyp_emb_threes,
-        exp_text_threes,
-        hyp_text_threes,
-        label_tensors,
+        hyp_emb_three,
+        edu_labels_three,
     ) = zip(*batch)
 
     # 处理假设嵌入
@@ -319,56 +317,26 @@ def collate_fn(batch):
                     for emb in sample
                 ]
             )
-            for sample in hyp_emb_threes
+            for sample in hyp_emb_three
         ]
     )
 
     # 处理文本数据
-    exp_text_threes = list(exp_text_threes)
-    hyp_text_threes = list(hyp_text_threes)
-    list_0, list_1, list_2 = zip(*exp_text_threes)
-    hyp_list_0, hyp_list_1, hyp_list_2 = zip(*hyp_text_threes)
-
-    # # 对图进行批处理
-    # batched_g_premises = dgl.batch(list(g_premises))
-    # batched_g_hypotheses = dgl.batch(list(g_hypotheses))
 
     # 处理标签张量 - 不再stack，而是保持列表形式
-    batched_labels = {
-        "premise1": {
-            "entailment": [
-                labels["premise1"]["entailment"] for labels in label_tensors
-            ],
-            "neutral": [labels["premise1"]["neutral"] for labels in label_tensors],
-            "contradiction": [
-                labels["premise1"]["contradiction"] for labels in label_tensors
-            ],
-        },
-        "premise2": {
-            "entailment": [
-                labels["premise2"]["entailment"] for labels in label_tensors
-            ],
-            "neutral": [labels["premise2"]["neutral"] for labels in label_tensors],
-            "contradiction": [
-                labels["premise2"]["contradiction"] for labels in label_tensors
-            ],
-        },
-    }
 
     return (
-        list(g_premises),
-        list(g_hypotheses),
+        list(g_premise),
+        list(g_premise2),
         list(lexical_chains),
         hyp_emb_threes,
-        (list(list_0), list(list_1), list(list_2)),
-        (list(hyp_list_0), list(hyp_list_1), list(hyp_list_2)),
-        batched_labels,
+        list(edu_labels_three),  # 保持列表形式,
     )
 
 
 def process_batch(model, batch_data, device, task, stage="train", optimizer=None):
     """处理一个batch的通用逻辑"""
-    graph1, graph2, lexical_chain, hyp_emb, exp_text, hyp_text, edu_labels = batch_data
+    graph1, graph2, lexical_chain, hyp_emb, edu_labels = batch_data
     batch_loss = 0
     # 合并图
     combined_graphs = [
@@ -397,8 +365,7 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
         "losses": defaultdict(float),
         "predictions": [],
         "labels": [],
-        "generation_metrics": defaultdict(float),
-        "generation_metrics_acc": defaultdict(float),
+        "generation_f1": float(0),
     }
 
     # 分类任务
@@ -411,25 +378,10 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
         )
         classification_losses = []
 
-        for embeddings, targets, _, label in [
-            (
-                positive,
-                torch.zeros(len(hyp_emb), dtype=torch.long, device=device),
-                None,
-                "entailment",
-            ),
-            (
-                neutral,
-                torch.ones(len(hyp_emb), dtype=torch.long, device=device),
-                None,
-                "neutral",
-            ),
-            (
-                negative,
-                torch.full((len(hyp_emb),), 2, dtype=torch.long, device=device),
-                None,
-                "contradiction",
-            ),
+        for embeddings, targets in [
+            (positive, torch.zeros(len(hyp_emb), dtype=torch.long, device=device)),
+            (neutral, torch.ones(len(hyp_emb), dtype=torch.long, device=device)),
+            (negative, torch.full((len(hyp_emb),), 2, dtype=torch.long, device=device)),
         ]:
             cli_logits = model.classify(graph_repr, embeddings)
             cls_loss = F.cross_entropy(cli_logits, targets)
@@ -438,7 +390,7 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
             predicted_cli_batch.extend(predicted)
             labels_cli_batch.extend(targets.cpu().numpy())
 
-        classification_loss = sum(classification_losses)
+        classification_loss = sum(classification_losses) / 3
         batch_loss = classification_loss + triplet_loss
 
         batch_metrics["losses"]["triplet_loss"] += triplet_loss.item()
@@ -449,24 +401,21 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
     # 生成任务
     if task == "generation" or task == "joint":
         # logging.info("Processing generation task")
-        predicted_nodes_features = {
-            relation: {"graph1": [], "graph2": []}
-            for relation in ["entailment", "neutral", "contradiction"]
-        }
-
-        for relation, hyp_emb in zip(
-            ["entailment", "neutral", "contradiction"],
-            [positive, neutral, negative],
+        # predicted_nodes_features = {
+        #     relation: {"graph1": [], "graph2": []}
+        #     for relation in ["entailment", "neutral", "contradiction"]
+        # }
+        entailment_edus = [
+            item["entailment"] for item in edu_labels
+        ]  # [ [tensor, tensor], [...], ...]
+        contradiction_edus = [item["contradiction"] for item in edu_labels]
+        for hyp_emb, edu_label in zip(
+            [positive, negative],
+            [entailment_edus, contradiction_edus],
         ):
-            edu_labels["premise1"][relation] = [
-                tensor.to(device) for tensor in edu_labels["premise1"][relation]
-            ]
-            edu_labels["premise2"][relation] = [
-                tensor.to(device) for tensor in edu_labels["premise2"][relation]
-            ]
-            premise_labels = edu_labels["premise1"][relation]
-            premise2_labels = edu_labels["premise2"][relation]
-
+            # hyp_emb : [batch_size, 1024]
+            premise_labels = [item[0] for item in edu_label]
+            premise2_labels = [item[1] for item in edu_label]
             p1_node_logits, p1_attn = model.extract_explanation(graph1, hyp_emb)
             p2_node_logits, p2_attn = model.extract_explanation(graph2, hyp_emb)
 
@@ -498,7 +447,7 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
 
             pair_loss = extract_loss1 + extract_loss2
 
-            batch_loss += pair_loss
+            batch_loss += pair_loss / 2
             batch_metrics["losses"]["gen_loss"] += (
                 extract_loss1.item() + extract_loss2.item()
             )
@@ -509,111 +458,137 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
                 p1_predictions = torch.argmax(p1_node_logits, dim=-1)
                 p2_predictions = torch.argmax(p2_node_logits, dim=-1)
 
-                # 初始化存储结构
-                g1_target_texts = []
-                g2_target_texts = []
-                g1_pred_texts = []
-                g2_pred_texts = []
-
-                # 处理graph1
-                g1_cumsum = 0
-                for batch_idx, batch_label in enumerate(premise_labels):
-                    # 获取目标文本
-                    positive_indices = batch_label.nonzero().squeeze(-1)
-                    if positive_indices.dim() == 0 and positive_indices.nelement() == 1:
-                        positive_indices = positive_indices.unsqueeze(0)
-                    adjusted_indices = positive_indices + g1_cumsum
-                    edus_1 = [
-                        graph1.ndata["text_encoded"][i.item()] for i in adjusted_indices
-                    ]
-                    edus_1 = [decode_text_from_tensor(text) for text in edus_1]
-                    g1_target_texts.append(edus_1)
-                    # 获取预测文本
-                    batch_predictions = p1_predictions[
-                        g1_cumsum : g1_cumsum + batch_label.size(0)
-                    ]
-                    pred_indices = batch_predictions.eq(1).nonzero().squeeze(-1)
-                    if pred_indices.dim() == 0 and pred_indices.nelement() == 1:
-                        pred_indices = pred_indices.unsqueeze(0)
-                    adjusted_pred_indices = pred_indices + g1_cumsum
-                    edus1_pre = [
-                        graph1.ndata["text_encoded"][i.item()]
-                        for i in adjusted_pred_indices
-                    ]
-                    edus1_pre = [decode_text_from_tensor(text) for text in edus1_pre]
-                    g1_pred_texts.append(edus1_pre)
-                    g1_cumsum += batch_label.size(0)
-
-                # 处理graph2
-                g2_cumsum = 0
-                for batch_idx, batch_label in enumerate(premise2_labels):
-                    # 获取目标文本
-                    positive_indices = batch_label.nonzero().squeeze(-1)
-                    if positive_indices.dim() == 0 and positive_indices.nelement() == 1:
-                        positive_indices = positive_indices.unsqueeze(0)
-                    adjusted_indices = positive_indices + g2_cumsum
-                    edus_2 = [
-                        graph2.ndata["text_encoded"][i.item()] for i in adjusted_indices
-                    ]
-                    edus_2 = [decode_text_from_tensor(text) for text in edus_2]
-                    g2_target_texts.append(edus_2)
-
-                    # 获取预测文本
-                    batch_predictions = p2_predictions[
-                        g2_cumsum : g2_cumsum + batch_label.size(0)
-                    ]
-                    pred_indices = batch_predictions.eq(1).nonzero().squeeze(-1)
-                    if pred_indices.dim() == 0 and pred_indices.nelement() == 1:
-                        pred_indices = pred_indices.unsqueeze(0)
-                    adjusted_pred_indices = pred_indices + g2_cumsum
-                    edus_2_pre = [
-                        graph2.ndata["text_encoded"][i.item()]
-                        for i in adjusted_pred_indices
-                    ]
-                    edus_2_pre = [decode_text_from_tensor(text) for text in edus_2_pre]
-                    g2_pred_texts.append(edus_2_pre)
-                    g2_cumsum += batch_label.size(0)
-
-                # 计算每个图的BLEU值
-                g1_bleu_list = [
-                    calculate_graph_bleu(g1_target_text, g1_pred_text)
-                    for g1_target_text, g1_pred_text in zip(
-                        g1_target_texts, g1_pred_texts
-                    )
-                ]
-                g2_bleu_list = [
-                    calculate_graph_bleu(g2_target_text, g2_pred_text)
-                    for g2_target_text, g2_pred_text in zip(
-                        g2_target_texts, g2_pred_texts
-                    )
-                ]
-                g1_bleu = sum(g1_bleu_list) / len(g1_bleu_list) if g1_bleu_list else 0
-                g2_bleu = sum(g2_bleu_list) / len(g2_bleu_list) if g2_bleu_list else 0
-
-                # 存储结果
-                predicted_nodes_features[relation]["graph1"] = {
-                    # "target_texts": g1_target_texts,
-                    # "pred_texts": g1_pred_texts,
-                    "bleu": g1_bleu
-                }
-
-                predicted_nodes_features[relation]["graph2"] = {
-                    # "target_texts": g2_target_texts,
-                    # "pred_texts": g2_pred_texts,
-                    "bleu": g2_bleu
-                }
-
-                # 获取当前图中预测为1的节点索引
-                batch_metrics["generation_metrics_acc"][f"{relation}_p1_acc"] = (
-                    (p1_predictions == torch.cat(premise_labels)).float().mean().item()
+                p1_correct = (
+                    (p1_predictions == torch.cat(premise_labels).to(device))
+                    .sum()
+                    .item()
                 )
-                batch_metrics["generation_metrics"][f"{relation}_p1_bleu"] = g1_bleu
-
-                batch_metrics["generation_metrics_acc"][f"{relation}_p2_acc"] = (
-                    (p2_predictions == torch.cat(premise2_labels)).float().mean().item()
+                p2_correct = (
+                    (p2_predictions == torch.cat(premise2_labels).to(device))
+                    .sum()
+                    .item()
                 )
-                batch_metrics["generation_metrics"][f"{relation}_p2_bleu"] = g2_bleu
 
+                p1_acc = p1_correct / total_len_p1
+                p2_acc = p2_correct / total_len_p2
+
+                p1_f1 = f1_score(
+                    torch.cat(premise_labels).to(device).cpu(), p1_predictions.cpu()
+                )
+                p2_f1 = f1_score(
+                    torch.cat(premise2_labels).to(device).cpu(), p2_predictions.cpu()
+                )
+                batch_metrics["generation_f1"] += (
+                    (p1_f1 + p2_f1) / 2 / 2
+                )  # 因为会循环两次
+
+            """
+
+            #     # 初始化存储结构
+            #     g1_target_texts = []
+            #     g2_target_texts = []
+            #     g1_pred_texts = []
+            #     g2_pred_texts = []
+
+            #     # 处理graph1
+            #     g1_cumsum = 0
+            #     for batch_idx, batch_label in enumerate(premise_labels):
+            #         # 获取目标文本
+            #         positive_indices = batch_label.nonzero().squeeze(-1)
+            #         if positive_indices.dim() == 0 and positive_indices.nelement() == 1:
+            #             positive_indices = positive_indices.unsqueeze(0)
+            #         adjusted_indices = positive_indices + g1_cumsum
+            #         edus_1 = [
+            #             graph1.ndata["text_encoded"][i.item()] for i in adjusted_indices
+            #         ]
+            #         edus_1 = [decode_text_from_tensor(text) for text in edus_1]
+            #         g1_target_texts.append(edus_1)
+            #         # 获取预测文本
+            #         batch_predictions = p1_predictions[
+            #             g1_cumsum : g1_cumsum + batch_label.size(0)
+            #         ]
+            #         pred_indices = batch_predictions.eq(1).nonzero().squeeze(-1)
+            #         if pred_indices.dim() == 0 and pred_indices.nelement() == 1:
+            #             pred_indices = pred_indices.unsqueeze(0)
+            #         adjusted_pred_indices = pred_indices + g1_cumsum
+            #         edus1_pre = [
+            #             graph1.ndata["text_encoded"][i.item()]
+            #             for i in adjusted_pred_indices
+            #         ]
+            #         edus1_pre = [decode_text_from_tensor(text) for text in edus1_pre]
+            #         g1_pred_texts.append(edus1_pre)
+            #         g1_cumsum += batch_label.size(0)
+
+            #     # 处理graph2
+            #     g2_cumsum = 0
+            #     for batch_idx, batch_label in enumerate(premise2_labels):
+            #         # 获取目标文本
+            #         positive_indices = batch_label.nonzero().squeeze(-1)
+            #         if positive_indices.dim() == 0 and positive_indices.nelement() == 1:
+            #             positive_indices = positive_indices.unsqueeze(0)
+            #         adjusted_indices = positive_indices + g2_cumsum
+            #         edus_2 = [
+            #             graph2.ndata["text_encoded"][i.item()] for i in adjusted_indices
+            #         ]
+            #         edus_2 = [decode_text_from_tensor(text) for text in edus_2]
+            #         g2_target_texts.append(edus_2)
+
+            #         # 获取预测文本
+            #         batch_predictions = p2_predictions[
+            #             g2_cumsum : g2_cumsum + batch_label.size(0)
+            #         ]
+            #         pred_indices = batch_predictions.eq(1).nonzero().squeeze(-1)
+            #         if pred_indices.dim() == 0 and pred_indices.nelement() == 1:
+            #             pred_indices = pred_indices.unsqueeze(0)
+            #         adjusted_pred_indices = pred_indices + g2_cumsum
+            #         edus_2_pre = [
+            #             graph2.ndata["text_encoded"][i.item()]
+            #             for i in adjusted_pred_indices
+            #         ]
+            #         edus_2_pre = [decode_text_from_tensor(text) for text in edus_2_pre]
+            #         g2_pred_texts.append(edus_2_pre)
+            #         g2_cumsum += batch_label.size(0)
+
+            #     # 计算每个图的BLEU值
+            #     g1_bleu_list = [
+            #         calculate_graph_bleu(g1_target_text, g1_pred_text)
+            #         for g1_target_text, g1_pred_text in zip(
+            #             g1_target_texts, g1_pred_texts
+            #         )
+            #     ]
+            #     g2_bleu_list = [
+            #         calculate_graph_bleu(g2_target_text, g2_pred_text)
+            #         for g2_target_text, g2_pred_text in zip(
+            #             g2_target_texts, g2_pred_texts
+            #         )
+            #     ]
+            #     g1_bleu = sum(g1_bleu_list) / len(g1_bleu_list) if g1_bleu_list else 0
+            #     g2_bleu = sum(g2_bleu_list) / len(g2_bleu_list) if g2_bleu_list else 0
+
+            #     # 存储结果
+            #     predicted_nodes_features[relation]["graph1"] = {
+            #         # "target_texts": g1_target_texts,
+            #         # "pred_texts": g1_pred_texts,
+            #         "bleu": g1_bleu
+            #     }
+
+            #     predicted_nodes_features[relation]["graph2"] = {
+            #         # "target_texts": g2_target_texts,
+            #         # "pred_texts": g2_pred_texts,
+            #         "bleu": g2_bleu
+            #     }
+
+            #     # 获取当前图中预测为1的节点索引
+            #     batch_metrics["generation_metrics_acc"][f"{relation}_p1_acc"] = (
+            #         (p1_predictions == torch.cat(premise_labels)).float().mean().item()
+            #     )
+            #     batch_metrics["generation_metrics"][f"{relation}_p1_bleu"] = g1_bleu
+
+            #     batch_metrics["generation_metrics_acc"][f"{relation}_p2_acc"] = (
+            #         (p2_predictions == torch.cat(premise2_labels)).float().mean().item()
+            #     )
+            #     batch_metrics["generation_metrics"][f"{relation}_p2_bleu"] = g2_bleu
+            """
     if stage == "train" and optimizer is not None:
         optimizer.zero_grad()
         batch_loss.backward()
@@ -648,7 +623,6 @@ def eval_epoch(model, dataloader, task, device):
     all_predictions = []
     all_labels = []
     classification_metrics = {}
-    generation_avg_metrics = {}
     generation_metrics = defaultdict(float)
 
     with torch.no_grad():
@@ -665,10 +639,8 @@ def eval_epoch(model, dataloader, task, device):
                 all_labels.extend(batch_metrics["labels"])
             if task == "generation" or task == "joint":
                 # 累积生成指标
-                for key, value in batch_metrics["generation_metrics"].items():
-                    generation_metrics[key] += value
-                for key, value in batch_metrics["generation_metrics_acc"].items():
-                    generation_metrics[key] += value
+                generation_metrics["f1"] += batch_metrics["generation_f1"]
+
     # 计算平均损失
     for key in epoch_losses:
         epoch_losses[key] /= len(dataloader)
@@ -684,23 +656,11 @@ def eval_epoch(model, dataloader, task, device):
     # 计算生成任务的平均指标
     if task == "generation" or task == "joint":
         for key in generation_metrics:
-            generation_avg_metrics[key] = generation_metrics[key] / len(dataloader)
-        logging.info(f"in eval generation_avg_metrics: {generation_avg_metrics}")
-        generation_sum_metrics = {
-            "pair_acc": sum(
-                v for k, v in generation_avg_metrics.items() if "acc" in k.lower()
-            )
-            / sum(1 for k in generation_avg_metrics if "acc" in k.lower()),
-            "pair_bleu": sum(
-                v for k, v in generation_avg_metrics.items() if "bleu" in k.lower()
-            )
-            / sum(1 for k in generation_avg_metrics if "bleu" in k.lower()),
-        }
-
+            generation_metrics[key] /= len(dataloader)
     return {
         "losses": epoch_losses,
         "classification_metrics": classification_metrics,
-        "generation_sum_metrics": generation_sum_metrics,
+        "generation_metrics": generation_metrics,
     }
 
 
@@ -726,24 +686,29 @@ def main():
         logging.info(f"Using device: {device}")
 
         config, train_dataset, dev_dataset, test_dataset = data_model_loader(device)
+        config.device = device
+        config.mode = "train"
+        config.stage = "generation"
+        config.epochs = 2
+        stage = config.stage
 
         train_loader = get_dataloader(train_dataset, config.batch_size)
         dev_loader = get_dataloader(dev_dataset, config.batch_size)
         test_loader = get_dataloader(test_dataset, config.batch_size)
+        print(len(train_loader), len(dev_loader), len(test_loader))
         # 保存配置
         os.makedirs(config.save_dir, exist_ok=True)
         yaml.add_representer(torch.device, represent_torch_device)
 
-        with open(os.path.join(config.save_dir, "config.yaml"), "w") as f:
+        with open(os.path.join(config.save_dir, f"config-{stage}.yaml"), "w") as f:
             yaml.dump(config.to_dict(), f)
         model = ExplainableHeteroClassifier(
             in_dim=config.model_config["in_dim"],
             hidden_dim=config.model_config["hidden_dim"],
             n_classes=config.model_config["n_classes"],
             rel_names=config.model_config["rel_names"],
-            device=config.model_config["device"],
+            device=device,
         ).to(device)
-        model = model.to(device)
         # 设置优化器和调度器
         optimizer = torch.optim.Adam(model.parameters(), lr=config.classifier_lr)
 
@@ -751,21 +716,18 @@ def main():
             optimizer, mode="min", factor=0.1, patience=3
         )
         start_epoch = 0
-        model, optimizer, scheduler, start_epoch, metrics = load_model(
-            model,
-            "/mnt/nlp/yuanmengying/ymy/new_data_process/checkpoints/experiment1/best_joint_model.pt",
-            optimizer,
-            scheduler,
-        )
+        # model, optimizer, scheduler, start_epoch, metrics = load_model(
+        #     model,
+        #     "/mnt/nlp/yuanmengying/ymy/new_data_process/checkpoints/experiment1/best_joint_model.pt",
+        #     optimizer,
+        #     scheduler,
+        # )
 
         # 初始化指标跟踪器
         metrics_tracker = MetricsTracker()
 
         # 训练循环
-        config.mode = "train"
-        config.stage = "generation"
-        config.epochs = 60
-        stage = config.stage
+
         logging.info(f"Starting {config.mode}  ==  {stage} task...")
         best_classification_f1 = 0
         best_generation_f1 = 0
@@ -793,11 +755,7 @@ def main():
                     **{f"eval_{k}": v for k, v in eval_results["losses"].items()},
                     **{
                         f"eval_{k}": v
-                        for k, v in eval_results["classification_metrics"].items()
-                    },
-                    **{
-                        f"eval_{k}": v
-                        for k, v in eval_results["generation_sum_metrics"].items()
+                        for k, v in eval_results["generation_metrics"].items()
                     },
                 }
             )
@@ -808,7 +766,7 @@ def main():
                 train_losses,
                 eval_results["losses"],
                 eval_results["classification_metrics"],
-                eval_results["generation_sum_metrics"],
+                eval_results["generation_metrics"],
                 stage,
             )
             if stage == "classification" and is_best_model(
@@ -833,7 +791,7 @@ def main():
             elif stage == "generation" and is_best_model(
                 eval_results, best_generation_f1, stage
             ):
-                best_generation_f1 = eval_results["generation_sum_metrics"]["pair_bleu"]
+                best_generation_f1 = eval_results["generation_metrics"]["f1"]
                 model_path = os.path.join(config.save_dir, f"best_generation_model.pt")
                 save_model(
                     model,
@@ -848,8 +806,8 @@ def main():
                 )
             elif stage == "joint" and is_best_model(eval_results, best_joint_f1, stage):
                 best_joint_f1 = (
-                    eval_results["generation_sum_metrics"]["pair_bleu"] * 0.4
-                    + eval_results["classification_metrics"]["f1"] * 0.6
+                    eval_results["generation_metrics"]["f1"] * 0.2
+                    + eval_results["classification_metrics"]["f1"] * 0.8
                 )
                 model_path = os.path.join(config.save_dir, f"best_joint_model.pt")
                 save_model(
@@ -858,7 +816,7 @@ def main():
                     optimizer=optimizer,
                     scheduler=scheduler,
                     epoch=epoch,
-                    metrics=eval_results["generation_sum_metrics"],
+                    metrics=eval_results["generation_metrics"],
                 )
         # 阶段结束，记录最终指标
         stage_metrics = metrics_tracker.get_all_averages()
@@ -879,7 +837,7 @@ def main():
         logging.info("\nTest metrics:")
         for metric_name, value in test_metrics["classification_metrics"].items():
             logging.info(f"  {metric_name}: {value:.4f}")
-        for metric_name, value in test_metrics["generation_sum_metrics"].items():
+        for metric_name, value in test_metrics["generation_metrics"].items():
             logging.info(f"  {metric_name}: {value:.4f}")
 
         # 记录日志
@@ -888,7 +846,7 @@ def main():
             train_losses,
             test_metrics["losses"],
             test_metrics["classification_metrics"],
-            test_metrics["generation_sum_metrics"],
+            test_metrics["generation_metrics"],
             stage,
         )
     # except Exception as e:
