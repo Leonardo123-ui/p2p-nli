@@ -36,9 +36,29 @@ import torch.multiprocessing as mp
 # 多进程配置
 
 import os
+import random
+
+
+def set_seed(seed=42):
+    """
+    设置所有随机种子以确保结果可复现
+
+    Args:
+        seed (int): 随机种子值，默认为42
+    """
+    random.seed(seed)  # Python的随机种子
+    np.random.seed(seed)  # NumPy的随机种子
+    torch.manual_seed(seed)  # PyTorch的CPU随机种子
+    torch.cuda.manual_seed_all(seed)  # PyTorch的GPU随机种子
+    dgl.random.seed(seed)  # DGL的随机种子
+
+    # 设置CUDA的随机种子生成器
+    torch.backends.cudnn.deterministic = True  # 确保每次返回的卷积算法是确定的
+    torch.backends.cudnn.benchmark = False  # 禁用cuDNN的自动调优功能
+
 
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 criterion = torch.nn.CrossEntropyLoss()
 
 rel_names_short = [
@@ -90,6 +110,13 @@ def get_dataloader(dataset, batch_size, shuffle=True):
         batch_size: 批次大小
         shuffle: 是否打乱数据
     """
+
+    def worker_init_fn(worker_id):
+        # 为每个工作进程设置不同的随机种子
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
     dataset.load_batch_files(0)  # 一个文件
     return GraphDataLoader(
         dataset,
@@ -99,6 +126,7 @@ def get_dataloader(dataset, batch_size, shuffle=True):
         num_workers=0,  # 设置为0，完全禁用多进程
         pin_memory=False,
         persistent_workers=False,
+        worker_init_fn=worker_init_fn if shuffle else None,
     )
 
 
@@ -117,6 +145,14 @@ def save_model(model, path, optimizer=None, scheduler=None, epoch=None, metrics=
     save_dict = {
         "model_state_dict": model.state_dict(),
         "config": model.config if hasattr(model, "config") else None,
+        "random_state": {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            ),
+        },
     }
 
     if optimizer is not None:
@@ -204,7 +240,7 @@ def log_metrics(
     log_msg = f"Epoch {epoch} ({stage})\n"
 
     # 添加训练损失
-    log_msg += "Training Losses:\n"
+    log_msg += "Losses:\n"
     for loss_name, loss_value in train_losses.items():
         log_msg += f"  {loss_name}: {loss_value:.4f}\n"
 
@@ -219,7 +255,7 @@ def log_metrics(
     # 记录日志
     logging.info(log_msg)
 
-    # 可选：使用 tensorboard 记录
+    # # 可选：使用 tensorboard 记录
     # if TENSORBOARD_AVAILABLE:
     #     for loss_name, loss_value in train_losses.items():
     #         writer.add_scalar(f'{stage}/train/{loss_name}', loss_value, epoch)
@@ -334,7 +370,9 @@ def collate_fn(batch):
     )
 
 
-def process_batch(model, batch_data, device, task, stage="train", optimizer=None):
+def process_batch(
+    model, batch_data, device, task, stage="train", optimizer=None, scheduler=None
+):
     """处理一个batch的通用逻辑"""
     graph1, graph2, lexical_chain, hyp_emb, edu_labels = batch_data
     batch_loss = 0
@@ -390,8 +428,8 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
             predicted_cli_batch.extend(predicted)
             labels_cli_batch.extend(targets.cpu().numpy())
 
-        classification_loss = sum(classification_losses) / 3
-        batch_loss = classification_loss + triplet_loss
+        classification_loss = sum(classification_losses)
+        batch_loss = classification_loss * 0.6 + triplet_loss * 0.4
 
         batch_metrics["losses"]["triplet_loss"] += triplet_loss.item()
         batch_metrics["losses"]["cls_loss"] += classification_loss.item()
@@ -447,7 +485,7 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
 
             pair_loss = extract_loss1 + extract_loss2
 
-            batch_loss += pair_loss / 2
+            batch_loss += pair_loss * 0.4
             batch_metrics["losses"]["gen_loss"] += (
                 extract_loss1.item() + extract_loss2.item()
             )
@@ -593,18 +631,19 @@ def process_batch(model, batch_data, device, task, stage="train", optimizer=None
         optimizer.zero_grad()
         batch_loss.backward()
         optimizer.step()
+        scheduler.step()
 
     return batch_metrics
 
 
-def train_epoch(model, dataloader, optimizer, task, device):
+def train_epoch(model, dataloader, optimizer, scheduler, task, device):
     """训练一个epoch"""
     model.train()
     epoch_losses = defaultdict(float)
 
     for batch_data in dataloader:
         batch_metrics = process_batch(
-            model, batch_data, device, task, "train", optimizer
+            model, batch_data, device, task, "train", optimizer, scheduler
         )
         for loss_name, loss_value in batch_metrics["losses"].items():
             epoch_losses[loss_name] += loss_value
@@ -673,6 +712,8 @@ def main():
     """
     主训练函数
     """
+    # 设置随机种子
+    set_seed(42)  # 可以根据需要修改种子值
     # 设置日志
     logging.basicConfig(
         level=logging.INFO,
@@ -687,9 +728,11 @@ def main():
 
         config, train_dataset, dev_dataset, test_dataset = data_model_loader(device)
         config.device = device
+        config.save_dir = "checkpoints/experiment2"
         config.mode = "train"
-        config.stage = "generation"
-        config.epochs = 2
+        config.stage = "joint"
+        config.epochs = 20
+        config.lr = 0.001
         stage = config.stage
 
         train_loader = get_dataloader(train_dataset, config.batch_size)
@@ -710,10 +753,20 @@ def main():
             device=device,
         ).to(device)
         # 设置优化器和调度器
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.classifier_lr)
+        # optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+        optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=0.01)
 
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.1, patience=3
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, mode="min", factor=0.1, patience=3
+        # )
+
+        num_training_steps = len(train_loader) * config.epochs
+        num_warmup_steps = num_training_steps // 10
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            num_cycles=0.5,
         )
         start_epoch = 0
         # model, optimizer, scheduler, start_epoch, metrics = load_model(
@@ -735,18 +788,24 @@ def main():
         for epoch in range(start_epoch, config.epochs):
             # 训练一个epoch
             train_losses = train_epoch(
-                model, train_loader, optimizer, task=config.stage, device=device
+                model,
+                train_loader,
+                optimizer,
+                scheduler,
+                task=config.stage,
+                device=device,
             )
-            logging.info(f"Epoch {epoch} train losses: {train_losses}")
             # 评估
             eval_results = eval_epoch(
                 model, dev_loader, task=config.stage, device=device
             )
-            logging.info(f"Epoch {epoch} eval losses: {eval_results['losses']}")
             # 更新学习率
-            if scheduler is not None:
-                sum_eval_loss = sum(eval_results["losses"].values())
-                scheduler.step(sum_eval_loss)
+            current_lr = optimizer.param_groups[0]["lr"]
+            logging.info(f"Current learning rate: {current_lr:.2e}")
+            # if scheduler is not None:
+            #     sum_eval_loss = sum(eval_results["losses"].values())
+            #     # scheduler.step(sum_eval_loss)
+            #     scheduler.step()
 
             # 记录指标
             metrics_tracker.update(
@@ -773,9 +832,7 @@ def main():
                 eval_results, best_classification_f1, stage
             ):  # 分类任务，用f1指标
                 best_classification_f1 = eval_results["classification_metrics"]["f1"]
-                model_path = os.path.join(
-                    config.save_dir, f"best_classification_model.pt"
-                )
+                model_path = os.path.join(config.save_dir, f"best_{stage}_model.pt")
                 save_model(
                     model,
                     model_path,
@@ -792,7 +849,7 @@ def main():
                 eval_results, best_generation_f1, stage
             ):
                 best_generation_f1 = eval_results["generation_metrics"]["f1"]
-                model_path = os.path.join(config.save_dir, f"best_generation_model.pt")
+                model_path = os.path.join(config.save_dir, f"best_{stage}_model.pt")
                 save_model(
                     model,
                     model_path,
@@ -809,7 +866,7 @@ def main():
                     eval_results["generation_metrics"]["f1"] * 0.2
                     + eval_results["classification_metrics"]["f1"] * 0.8
                 )
-                model_path = os.path.join(config.save_dir, f"best_joint_model.pt")
+                model_path = os.path.join(config.save_dir, f"best_{stage}_model.pt")
                 save_model(
                     model,
                     model_path,
@@ -821,7 +878,7 @@ def main():
         # 阶段结束，记录最终指标
         stage_metrics = metrics_tracker.get_all_averages()
         logging.info(f"\n{stage} training completed.")
-        logging.info("Final metrics:")
+        logging.info("Training average metrics:")
         for metric_name, value in stage_metrics.items():
             logging.info(f"  {metric_name}: {value:.4f}")
 
@@ -833,12 +890,14 @@ def main():
 
         #     # 测试
         logging.info("\nTesting...")
+        model, _, _, _, _ = load_model(
+            model,
+            os.path.join(config.save_dir, f"best_{stage}_model.pt"),
+            optimizer,
+            scheduler,
+        )
         test_metrics = eval_epoch(model, test_loader, task=config.stage, device=device)
         logging.info("\nTest metrics:")
-        for metric_name, value in test_metrics["classification_metrics"].items():
-            logging.info(f"  {metric_name}: {value:.4f}")
-        for metric_name, value in test_metrics["generation_metrics"].items():
-            logging.info(f"  {metric_name}: {value:.4f}")
 
         # 记录日志
         log_metrics(
@@ -849,10 +908,7 @@ def main():
             test_metrics["generation_metrics"],
             stage,
         )
-    # except Exception as e:
-    #     logging.error(f"Training failed with error: {str(e)}")
-    #     logging.error(traceback.format_exc())
-    #     raise
+
     finally:
         # 清理资源
         torch.cuda.empty_cache()
