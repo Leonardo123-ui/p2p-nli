@@ -87,7 +87,7 @@ class RSTDataset(Dataset):
     def __init__(
         self,
         rst_path,
-        nli_data_path,  # gpt生成的假设数据
+        nli_data_path,  # 假设数据
         premise_emb_path,  # 假设的embedding,
         lexical_matrix_path,
         hypothesis_emb_path,
@@ -185,7 +185,7 @@ class RSTDataset(Dataset):
         self.data = self.load_rst_data()
         self.nli_data = self.load_nli_data()
         self.hyp_emb = torch.load(self.hypothesis_emb_path)  # [(1,2,3),(),...]
-        self.edu_labels = self.load_edu_labels(self.nli_data)
+        self.edu_labels = self.load_edu_labels(self.nli_data)  # [[[],[]],] or []
 
         batch_lexical_chains = []
         batch_embeddings = []
@@ -235,18 +235,27 @@ class RSTDataset(Dataset):
                 node_types_hypothesis,
                 rst_relations_hypothesis,
             )
-            edu_label_entailment = edu_labels[idx * 2]
-            edu_label_contradiction = edu_labels[idx * 2 + 1]
-            edu_labels_three = {
-                "entailment": [
-                    self._create_label_tensor(g_premise, edu_label_entailment[0]),
-                    self._create_label_tensor(g_premise2, edu_label_entailment[1]),
-                ],
-                "contradiction": [
-                    self._create_label_tensor(g_premise, edu_label_contradiction[0]),
-                    self._create_label_tensor(g_premise2, edu_label_contradiction[1]),
-                ],
-            }
+            if edu_labels == []:
+                if idx == 0:
+                    print("empty edu_labels")  # 单语言的没有
+                edu_labels_three = {"entailment": [], "contradiction": []}
+            else:
+                edu_label_entailment = edu_labels[idx * 2]
+                edu_label_contradiction = edu_labels[idx * 2 + 1]
+                edu_labels_three = {
+                    "entailment": [
+                        self._create_label_tensor(g_premise, edu_label_entailment[0]),
+                        self._create_label_tensor(g_premise2, edu_label_entailment[1]),
+                    ],
+                    "contradiction": [
+                        self._create_label_tensor(
+                            g_premise, edu_label_contradiction[0]
+                        ),
+                        self._create_label_tensor(
+                            g_premise2, edu_label_contradiction[1]
+                        ),
+                    ],
+                }
 
             graph_pairs.append(
                 (
@@ -278,30 +287,34 @@ class RSTDataset(Dataset):
 
 
 if __name__ == "__main__":
+    base_data_dir = "/mnt/nlp/yuanmengying/ymy/data"
+    dir = "2cd_nli_Spanish"
+    language = "Spanish"
+    type_list = ["train", "dev", "test"]
     batch_file_size = 1
-    train_rst_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/train/train1/new_rst_result.jsonl"
-    )
-    train_nli_data_path = (
-        r"/mnt/nlp/yuanmengying/ymy/data/nli_type_data/v2/train_re_hyp.json"
-    )
-    train_pre_emb_path = (
-        "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/train/pre/node_embeddings.npz"
-    )
-    train_hyp_emb_path = (
-        "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/train/hyp/hyp_node_embeddings.npz"
-    )
-    train_lexical_path = "/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_infos/train/lexical_matrixes.npz"
-    train_pair_graph = r"/mnt/nlp/yuanmengying/ymy/data/new_2cd_nli/graph_pairs/train"
-    train_dataset = RSTDataset(
-        train_rst_path,
-        train_nli_data_path,
-        train_pre_emb_path,
-        train_lexical_path,
-        train_hyp_emb_path,
-        batch_file_size,
-        save_dir=train_pair_graph,
-    )
-    train_dataset.load_batch_files(0)
-    for batch_data in train_dataset:
-        print("safe")
+    for type in type_list:
+        print("*" * 30, type, "*" * 30)
+        train_rst_path = f"{base_data_dir}/{dir}/{type}/{type}1/new_rst_result.jsonl"
+        train_nli_data_path = (
+            f"{base_data_dir}/nli_type_data/{language}/{type}.json"  # train_re_hyp.json
+        )
+
+        train_pre_emb_path = f"{base_data_dir}/{dir}/{type}/pre/node_embeddings.npz"
+
+        train_hyp_emb_path = f"{base_data_dir}/{dir}/{type}/hyp/hyp_node_embeddings.npz"
+        train_lexical_path = (
+            f"{base_data_dir}/{dir}/graph_infos/{type}/lexical_matrixes.npz"
+        )
+        train_pair_graph = f"{base_data_dir}/{dir}/graph_pairs/{type}"
+        train_dataset = RSTDataset(
+            train_rst_path,
+            train_nli_data_path,
+            train_pre_emb_path,
+            train_lexical_path,
+            train_hyp_emb_path,
+            batch_file_size,
+            save_dir=train_pair_graph,
+        )
+        train_dataset.load_batch_files(0)
+        for batch_data in train_dataset:
+            print("safe")

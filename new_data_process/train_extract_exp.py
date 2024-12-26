@@ -15,7 +15,7 @@ from transformers import get_cosine_schedule_with_warmup
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 from build_base_graph_extract import (
     merge_graphs,
     ExplainableHeteroClassifier,
@@ -23,12 +23,15 @@ from build_base_graph_extract import (
     save_texts_to_json,
 )
 from cal_scores import (
-    precision_score,
-    recall_score,
+    # precision_score,
+    # recall_score,
     calculate_graph_bleu,
     is_best_model,
 )
+
 from path_ini import data_model_loader
+
+# from path_ini_eng import data_model_loader
 from collections import defaultdict
 from transformers import get_linear_schedule_with_warmup
 import torch.multiprocessing as mp
@@ -58,18 +61,38 @@ def set_seed(seed=42):
 
 
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 criterion = torch.nn.CrossEntropyLoss()
 
 rel_names_short = [
-    "Cause",
+    # "Cause",
+    # "Condition",
+    # "Contrast",
+    # "Explanation",
+    # "Elaboration",
+    # "Attribution",
+    # "Background",
+    # "lexical",
+    "Temporal",
+    "TextualOrganization",
+    "Joint",
+    "Topic-Comment",
+    "Comparison",
     "Condition",
     "Contrast",
-    "Explanation",
-    "Elaboration",
+    "Evaluation",
+    "Topic-Change",
+    "Summary",
+    "Manner-Means",
     "Attribution",
+    "Cause",
     "Background",
-    "lexical",
+    "Enablement",
+    "Explanation",
+    "Same-Unit",
+    "Elaboration",
+    "span",  # 可以考虑去掉，因为关系不密切
+    "lexical",  # 词汇链
 ]
 
 
@@ -434,9 +457,10 @@ def process_batch(
 
         classification_loss = torch.stack(classification_losses).sum()
         if task == "classification":
-            batch_loss = classification_loss * 0.6 + triplet_loss * 0.4
+            batch_loss = classification_loss * 1 + triplet_loss * 3
+            # batch_loss = classification_loss + triplet_loss
         else:
-            batch_loss = (classification_loss * 0.6 + triplet_loss * 0.4) * 1.2
+            batch_loss = (classification_loss * 1 + triplet_loss * 3) * 0.8
 
         batch_metrics["losses"]["triplet_loss"] += triplet_loss.item()
         batch_metrics["losses"]["cls_loss"] += classification_loss.item()
@@ -492,7 +516,8 @@ def process_batch(
             if task == "generation":
                 batch_loss += pair_loss
             else:
-                batch_loss += pair_loss * 0.9
+                batch_loss += pair_loss * 0.4
+                # batch_loss += pair_loss
             batch_metrics["losses"]["gen_loss"] += (
                 extract_loss1.item() + extract_loss2.item()
             )
@@ -716,8 +741,10 @@ def eval_epoch(model, dataloader, task, device):
             "accuracy": accuracy_score(all_labels, all_predictions),
             "f1_macro_cli": f1_score(all_labels, all_predictions, average="macro"),
             "f1_micro_cli": f1_score(all_labels, all_predictions, average="micro"),
-            "precision": precision_score(all_labels, all_predictions, average="macro"),
-            "recall": recall_score(all_labels, all_predictions, average="macro"),
+            # "precision": precision_score(all_labels, all_predictions, average="macro"),
+            # "recall": recall_score(all_labels, all_predictions, average="macro"),
+            "precision": precision_score(all_labels, all_predictions),
+            "recall": recall_score(all_labels, all_predictions),
         }
 
     # 计算生成任务的平均指标
@@ -758,9 +785,9 @@ def main():
         config.device = device
         config.save_dir = "checkpoints/experiment3"
         config.mode = "train"
-        config.stage = "joint"
-        config.epochs = 20
-        config.lr = 1e-3
+        config.stage = "classification"
+        config.epochs = 10
+        config.lr = 1e-4
         stage = config.stage
 
         train_loader = get_dataloader(train_dataset, config.batch_size)

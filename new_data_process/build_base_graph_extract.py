@@ -309,6 +309,15 @@ def save_texts_to_json(generated_texts, golden_texts, filename):
             print("无法保存为纯文本格式。")
 
 
+class FusionMLP(nn.Module):
+    def __init__(self):
+        super(FusionMLP, self).__init__()
+        self.fc = nn.Sequential(nn.Linear(2048, 1024), nn.ReLU())
+
+    def forward(self, x):
+        return self.fc(x)
+
+
 def batch_triplet_loss_with_neutral(anchor, hyp, margin=1.0, neutral_weight=0.5):
     """
     计算批量三元组损失，支持 positive 和 negative 的维度为 [batch_size, 3, embedding_dim]。
@@ -323,7 +332,7 @@ def batch_triplet_loss_with_neutral(anchor, hyp, margin=1.0, neutral_weight=0.5)
     - total_loss: 批量的总损失。
     """
     # 分别提取 positive（蕴含），neutral（中立），negative（矛盾）的嵌入
-    positive = hyp[:, 0, :]  # [16, 1024] 蕴含
+    positive = hyp[:, 0, :]  # [batch_size, 1024] 蕴含
     neutral = hyp[:, 1, :]  # [16, 1024] 中立
     negative = hyp[:, 2, :]  # [16, 1024] 矛盾
 
@@ -463,18 +472,26 @@ class ExplainableHeteroClassifier(nn.Module):
         super().__init__()
         self.n_classes = n_classes
         self.label_smoothing = 0.1
-        # 图编码器
-        self.rgat = RGAT(
+        # 任务特定编码器
+        self.rgat_classification = RGAT(
             in_dim=in_dim,
             hidden_dim=hidden_dim,
             out_dim=hidden_dim,
             rel_names=rel_names,
         )
-        self.rgat_edu_labels = RGAT(
+        self.classifier = nn.Linear(hidden_dim * 2, n_classes)
+
+        self.rgat_generation = RGAT(
             in_dim=in_dim,
             hidden_dim=hidden_dim,
             out_dim=hidden_dim,
-            rel_names=relation_types,
+            rel_names=relation_types,  # 使用生成任务特定的关系类型
+        )
+        self.node_classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 2),
         )
         self.pooling = dglnn.AvgPooling()
         # 假设嵌入的投影层
@@ -482,15 +499,7 @@ class ExplainableHeteroClassifier(nn.Module):
         self.query_proj = nn.Linear(in_dim, hidden_dim)
         self.key_proj = nn.Linear(in_dim, hidden_dim)
         self.value_proj = nn.Linear(in_dim, hidden_dim)
-        # nli分类器
-        self.classifier = nn.Linear(hidden_dim * 2, n_classes)
-        # edu级别的分类器
-        self.node_classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, 2),  # 2表示EDU的二分类
-        )
+
         # 关系类型权重
         self.relation_weights = nn.Parameter(torch.ones(len(rel_names)))
         self.softmax = nn.Softmax(dim=0)
@@ -501,6 +510,19 @@ class ExplainableHeteroClassifier(nn.Module):
             batch_first=True,  # 使用 batch_first=True 更直观
         )
 
+    def freeze_task_components(self, task):
+        """冻结特定任务的组件"""
+        if task == "classification":
+            for param in self.rgat_generation.parameters():
+                param.requires_grad = False
+            for param in self.node_classifier.parameters():
+                param.requires_grad = False
+        elif task == "generation":
+            for param in self.rgat_classification.parameters():
+                param.requires_grad = False
+            for param in self.classifier.parameters():
+                param.requires_grad = False
+
     def graph_info(self, graph):
         """
         获取图的编码信息
@@ -509,7 +531,7 @@ class ExplainableHeteroClassifier(nn.Module):
             attention_weights: 注意力权重
             graph_repr: 图表示
         """
-        node_feats, attention_weights = self.rgat(
+        node_feats, attention_weights = self.rgat_classification(
             graph, {"node": graph.ndata["feat"]}, return_attention=True
         )
         graph_repr = self.pooling(graph, node_feats["node"])
@@ -529,7 +551,7 @@ class ExplainableHeteroClassifier(nn.Module):
 
     def extract_explanation(self, graph, hyp_emb):
         # 获取 RGAT 的节点特征和注意力权重
-        node_feats, attention_weights = self.rgat_edu_labels(
+        node_feats, attention_weights = self.rgat_generation(
             graph, {"node": graph.ndata["feat"]}, return_attention=True
         )
         batch_size = hyp_emb.size(0)
@@ -555,6 +577,13 @@ class ExplainableHeteroClassifier(nn.Module):
         node_importance_padded = torch.nn.utils.rnn.pad_sequence(
             node_importance_split, batch_first=True
         )  # [batch_size, max_nodes]
+        node_feats_split = torch.split(node_feats["node"], graph_nodes.tolist())
+        node_feats_padded = torch.nn.utils.rnn.pad_sequence(
+            node_feats_split, batch_first=True
+        )  # [batch_size, max_nodes, hidden_dim]
+        weighted_node_feats_padded = (
+            node_feats_padded * node_importance_padded.unsqueeze(-1)
+        )
 
         # 创建注意力掩码
         max_nodes = node_importance_padded.size(1)
@@ -567,9 +596,166 @@ class ExplainableHeteroClassifier(nn.Module):
         hyp_expanded = hyp_emb.unsqueeze(1).expand(
             -1, max_nodes, -1
         )  # [batch_size, max_nodes, hidden_dim]
+
+        # 使用注意力计算节点和 hypothesis 的交互特征
+        attn_output, attn_weights = self.attention(
+            query=hyp_expanded,
+            key=node_feats_padded,
+            value=node_feats_padded,
+            key_padding_mask=attention_mask,
+        )  # [batch_size, max_nodes, hidden_dim]
+
+        # 合并重要性特征与交互特征
+        # combined_features = torch.cat([node_feats_padded, attn_output], dim=-1)
+        combined_features = torch.cat([weighted_node_feats_padded, attn_output], dim=-1)
+        combined_features_split = [
+            combined_features[i, : graph_nodes[i]] for i in range(batch_size)
+        ]
+        combined_features = torch.cat(
+            combined_features_split, dim=0
+        )  # [total_nodes, hidden_dim * 2]
+
+        # 生成节点分类 logits
+        node_logits = self.node_classifier(combined_features)
+
+        return node_logits, attention_weights
+
+
+class ExplainableHeteroClassifier_without_lexical_chain(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        hidden_dim,
+        n_classes,
+        rel_names,
+        device,
+    ):
+        super().__init__()
+        self.n_classes = n_classes
+        self.label_smoothing = 0.1
+        # 任务特定编码器
+        self.rgat_classification = RGAT(
+            in_dim=in_dim,
+            hidden_dim=hidden_dim,
+            out_dim=hidden_dim,
+            rel_names=rel_names,
+        )
+        self.classifier = nn.Linear(hidden_dim * 3, n_classes)
+
+        self.rgat_generation = RGAT(
+            in_dim=in_dim,
+            hidden_dim=hidden_dim,
+            out_dim=hidden_dim,
+            rel_names=relation_types,  # 使用生成任务特定的关系类型
+        )
+        self.node_classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 2),
+        )
+        self.pooling = dglnn.AvgPooling()
+        # 假设嵌入的投影层
+        # 添加投影层来调整维度
+        self.query_proj = nn.Linear(in_dim, hidden_dim)
+        self.key_proj = nn.Linear(in_dim, hidden_dim)
+        self.value_proj = nn.Linear(in_dim, hidden_dim)
+
+        # 关系类型权重
+        self.relation_weights = nn.Parameter(torch.ones(len(rel_names)))
+        self.softmax = nn.Softmax(dim=0)
+        self.device = device
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=4,
+            batch_first=True,  # 使用 batch_first=True 更直观
+        )
+
+    def freeze_task_components(self, task):
+        """冻结特定任务的组件"""
+        if task == "classification":
+            for param in self.rgat_generation.parameters():
+                param.requires_grad = False
+            for param in self.node_classifier.parameters():
+                param.requires_grad = False
+        elif task == "generation":
+            for param in self.rgat_classification.parameters():
+                param.requires_grad = False
+            for param in self.classifier.parameters():
+                param.requires_grad = False
+
+    def graph_info(self, graph):
+        """
+        获取图的编码信息
+        Returns:
+            node_feats: 节点特征
+            attention_weights: 注意力权重
+            graph_repr: 图表示
+        """
+        node_feats, attention_weights = self.rgat_classification(
+            graph, {"node": graph.ndata["feat"]}, return_attention=True
+        )
+        graph_repr = self.pooling(graph, node_feats["node"])
+
+        if torch.isnan(graph_repr).any():
+            print("Warning: NaN detected in RGAT output.")
+
+        return node_feats, attention_weights, graph_repr
+
+    def classify(self, graph_repr, hyp_emb):
+        """编码输入图"""
+        # 1. 获取RGAT的节点表示和注意力权重
+        combined_features = torch.cat([graph_repr, hyp_emb], dim=1)
+        logits = self.classifier(combined_features)
+        # outputs.update({"cli_logits": logits})  # {"logits": logits}
+        return logits
+
+    def extract_explanation(self, graph, hyp_emb):
+        # 获取 RGAT 的节点特征和注意力权重
+        node_feats, attention_weights = self.rgat_generation(
+            graph, {"node": graph.ndata["feat"]}, return_attention=True
+        )
+        batch_size = hyp_emb.size(0)
+        graph_nodes = graph.batch_num_nodes()  # 每个图的节点数量 type:Tensor
+        total_nodes = graph.num_nodes()  # 所有图的总节点数
+
+        # 使用返回的 attention_weights 直接计算节点的重要性
+        node_importance = []
+        for etype, weights in attention_weights.items():
+            # 计算每个关系类型上的节点加权重要性
+            edge_importance = torch.zeros(total_nodes, device=weights.device)
+            for edge_idx, edge_weight in enumerate(weights):
+                src, dst = graph.edges(etype=etype)
+                edge_importance[dst[edge_idx]] += edge_weight.mean().item()
+            node_importance.append(edge_importance)
+
+        # 合并不同关系上的节点重要性
+        node_importance = sum(node_importance)  # size [total_nodes] type Tensor
+        # 按批次拆分节点重要性
+        node_importance_split = torch.split(
+            node_importance, graph_nodes.tolist()
+        )  # 按图拆分
+        node_importance_padded = torch.nn.utils.rnn.pad_sequence(
+            node_importance_split, batch_first=True
+        )  # [batch_size, max_nodes]
         node_feats_split = torch.split(node_feats["node"], graph_nodes.tolist())
         node_feats_padded = torch.nn.utils.rnn.pad_sequence(
             node_feats_split, batch_first=True
+        )  # [batch_size, max_nodes, hidden_dim]
+
+        weighted_node_feats_padded = (
+            node_feats_padded * node_importance_padded.unsqueeze(-1)
+        )
+        # 创建注意力掩码
+        max_nodes = node_importance_padded.size(1)
+        attention_mask = torch.zeros(
+            batch_size, max_nodes, dtype=torch.bool, device=graph.device
+        )
+        for i, length in enumerate(graph_nodes):
+            attention_mask[i, length:] = True
+        # 使用 hypothesis 对节点重要性进行加权
+        hyp_expanded = hyp_emb.unsqueeze(1).expand(
+            -1, max_nodes, -1
         )  # [batch_size, max_nodes, hidden_dim]
 
         # 使用注意力计算节点和 hypothesis 的交互特征
@@ -581,7 +767,169 @@ class ExplainableHeteroClassifier(nn.Module):
         )  # [batch_size, max_nodes, hidden_dim]
 
         # 合并重要性特征与交互特征
-        combined_features = torch.cat([node_feats_padded, attn_output], dim=-1)
+        # combined_features = torch.cat([node_feats_padded, attn_output], dim=-1)
+        combined_features = torch.cat([weighted_node_feats_padded, attn_output], dim=-1)
+        combined_features_split = [
+            combined_features[i, : graph_nodes[i]] for i in range(batch_size)
+        ]
+        combined_features = torch.cat(
+            combined_features_split, dim=0
+        )  # [total_nodes, hidden_dim * 2]
+
+        # 生成节点分类 logits
+        node_logits = self.node_classifier(combined_features)
+
+        return node_logits, attention_weights
+
+
+class ExplainableHeteroClassifier_Single(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        hidden_dim,
+        n_classes,
+        rel_names,
+        device,
+    ):
+        super().__init__()
+        self.n_classes = n_classes
+        self.label_smoothing = 0.1
+        # 任务特定编码器
+        self.rgat_classification = RGAT(
+            in_dim=in_dim,
+            hidden_dim=hidden_dim,
+            out_dim=hidden_dim,
+            rel_names=relation_types,
+        )
+        self.classifier = nn.Linear(hidden_dim * 2, n_classes)
+
+        self.rgat_generation = RGAT(
+            in_dim=in_dim,
+            hidden_dim=hidden_dim,
+            out_dim=hidden_dim,
+            rel_names=relation_types,  # 使用生成任务特定的关系类型
+        )
+        self.node_classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, 2),
+        )
+        self.pooling = dglnn.AvgPooling()
+        # 假设嵌入的投影层
+        # 添加投影层来调整维度
+        self.query_proj = nn.Linear(in_dim, hidden_dim)
+        self.key_proj = nn.Linear(in_dim, hidden_dim)
+        self.value_proj = nn.Linear(in_dim, hidden_dim)
+
+        # 关系类型权重
+        self.relation_weights = nn.Parameter(torch.ones(len(rel_names)))
+        self.softmax = nn.Softmax(dim=0)
+        self.device = device
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=4,
+            batch_first=True,  # 使用 batch_first=True 更直观
+        )
+
+    def freeze_task_components(self, task):
+        """冻结特定任务的组件"""
+        if task == "classification":
+            for param in self.rgat_generation.parameters():
+                param.requires_grad = False
+            for param in self.node_classifier.parameters():
+                param.requires_grad = False
+        elif task == "generation":
+            for param in self.rgat_classification.parameters():
+                param.requires_grad = False
+            for param in self.classifier.parameters():
+                param.requires_grad = False
+
+    def graph_info(self, graph):
+        """
+        获取图的编码信息
+        Returns:
+            node_feats: 节点特征
+            attention_weights: 注意力权重
+            graph_repr: 图表示
+        """
+        node_feats, attention_weights = self.rgat_classification(
+            graph, {"node": graph.ndata["feat"]}, return_attention=True
+        )
+        graph_repr = self.pooling(graph, node_feats["node"])
+
+        if torch.isnan(graph_repr).any():
+            print("Warning: NaN detected in RGAT output.")
+
+        return node_feats, attention_weights, graph_repr
+
+    def classify(self, graph_repr, hyp_emb):
+        """编码输入图"""
+        # 1. 获取RGAT的节点表示和注意力权重
+        combined_features = torch.cat([graph_repr, hyp_emb], dim=1)
+        logits = self.classifier(combined_features)
+        # outputs.update({"cli_logits": logits})  # {"logits": logits}
+        return logits
+
+    def extract_explanation(self, graph, hyp_emb):
+        # 获取 RGAT 的节点特征和注意力权重
+        node_feats, attention_weights = self.rgat_generation(
+            graph, {"node": graph.ndata["feat"]}, return_attention=True
+        )
+        batch_size = hyp_emb.size(0)
+        graph_nodes = graph.batch_num_nodes()  # 每个图的节点数量 type:Tensor
+        total_nodes = graph.num_nodes()  # 所有图的总节点数
+
+        # 使用返回的 attention_weights 直接计算节点的重要性
+        node_importance = []
+        for etype, weights in attention_weights.items():
+            # 计算每个关系类型上的节点加权重要性
+            edge_importance = torch.zeros(total_nodes, device=weights.device)
+            for edge_idx, edge_weight in enumerate(weights):
+                src, dst = graph.edges(etype=etype)
+                edge_importance[dst[edge_idx]] += edge_weight.mean().item()
+            node_importance.append(edge_importance)
+
+        # 合并不同关系上的节点重要性
+        node_importance = sum(node_importance)  # size [total_nodes] type Tensor
+        # 按批次拆分节点重要性
+        node_importance_split = torch.split(
+            node_importance, graph_nodes.tolist()
+        )  # 按图拆分
+        node_importance_padded = torch.nn.utils.rnn.pad_sequence(
+            node_importance_split, batch_first=True
+        )  # [batch_size, max_nodes]
+        node_feats_split = torch.split(node_feats["node"], graph_nodes.tolist())
+        node_feats_padded = torch.nn.utils.rnn.pad_sequence(
+            node_feats_split, batch_first=True
+        )  # [batch_size, max_nodes, hidden_dim]
+        weighted_node_feats_padded = (
+            node_feats_padded * node_importance_padded.unsqueeze(-1)
+        )
+
+        # 创建注意力掩码
+        max_nodes = node_importance_padded.size(1)
+        attention_mask = torch.zeros(
+            batch_size, max_nodes, dtype=torch.bool, device=graph.device
+        )
+        for i, length in enumerate(graph_nodes):
+            attention_mask[i, length:] = True
+        # 使用 hypothesis 对节点重要性进行加权
+        hyp_expanded = hyp_emb.unsqueeze(1).expand(
+            -1, max_nodes, -1
+        )  # [batch_size, max_nodes, hidden_dim]
+
+        # 使用注意力计算节点和 hypothesis 的交互特征
+        attn_output, attn_weights = self.attention(
+            query=hyp_expanded,
+            key=node_feats_padded,
+            value=node_feats_padded,
+            key_padding_mask=attention_mask,
+        )  # [batch_size, max_nodes, hidden_dim]
+
+        # 合并重要性特征与交互特征
+        # combined_features = torch.cat([node_feats_padded, attn_output], dim=-1)
+        combined_features = torch.cat([weighted_node_feats_padded, attn_output], dim=-1)
         combined_features_split = [
             combined_features[i, : graph_nodes[i]] for i in range(batch_size)
         ]
