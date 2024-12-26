@@ -15,6 +15,7 @@ from transformers import get_cosine_schedule_with_warmup
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging
+from sklearn.metrics import f1_score
 from build_base_graph_extract import (
     merge_graphs,
     ExplainableHeteroClassifier,
@@ -22,7 +23,6 @@ from build_base_graph_extract import (
     save_texts_to_json,
 )
 from cal_scores import (
-    f1_score,
     precision_score,
     recall_score,
     calculate_graph_bleu,
@@ -58,7 +58,7 @@ def set_seed(seed=42):
 
 
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 criterion = torch.nn.CrossEntropyLoss()
 
 rel_names_short = [
@@ -376,6 +376,7 @@ def process_batch(
     """处理一个batch的通用逻辑"""
     graph1, graph2, lexical_chain, hyp_emb, edu_labels = batch_data
     batch_loss = 0
+
     # 合并图
     combined_graphs = [
         merge_graphs(g_p1, g_p2, lc, rel_names_short)
@@ -403,11 +404,14 @@ def process_batch(
         "losses": defaultdict(float),
         "predictions": [],
         "labels": [],
-        "generation_f1": float(0),
+        "generation_f1": defaultdict(float),
     }
 
     # 分类任务
-    if task == "classification" or task == "joint":
+    if task != "generation":
+        if task != "joint":
+            model.freeze_task_components(task="classification")
+        # if task == "classification" or task == "joint":
         # logging.info("Processing classification task")
         predicted_cli_batch = []
         labels_cli_batch = []
@@ -428,8 +432,11 @@ def process_batch(
             predicted_cli_batch.extend(predicted)
             labels_cli_batch.extend(targets.cpu().numpy())
 
-        classification_loss = sum(classification_losses)
-        batch_loss = classification_loss * 0.6 + triplet_loss * 0.4
+        classification_loss = torch.stack(classification_losses).sum()
+        if task == "classification":
+            batch_loss = classification_loss * 0.6 + triplet_loss * 0.4
+        else:
+            batch_loss = (classification_loss * 0.6 + triplet_loss * 0.4) * 1.2
 
         batch_metrics["losses"]["triplet_loss"] += triplet_loss.item()
         batch_metrics["losses"]["cls_loss"] += classification_loss.item()
@@ -437,12 +444,10 @@ def process_batch(
         batch_metrics["labels"].extend(labels_cli_batch)
 
     # 生成任务
-    if task == "generation" or task == "joint":
-        # logging.info("Processing generation task")
-        # predicted_nodes_features = {
-        #     relation: {"graph1": [], "graph2": []}
-        #     for relation in ["entailment", "neutral", "contradiction"]
-        # }
+    if task != "classification":
+        if task != "joint":
+            model.freeze_task_components("generation")
+        # if task == "generation" or task == "joint":
         entailment_edus = [
             item["entailment"] for item in edu_labels
         ]  # [ [tensor, tensor], [...], ...]
@@ -484,8 +489,10 @@ def process_batch(
             )
 
             pair_loss = extract_loss1 + extract_loss2
-
-            batch_loss += pair_loss * 0.4
+            if task == "generation":
+                batch_loss += pair_loss
+            else:
+                batch_loss += pair_loss * 0.9
             batch_metrics["losses"]["gen_loss"] += (
                 extract_loss1.item() + extract_loss2.item()
             )
@@ -511,13 +518,28 @@ def process_batch(
                 p2_acc = p2_correct / total_len_p2
 
                 p1_f1 = f1_score(
-                    torch.cat(premise_labels).to(device).cpu(), p1_predictions.cpu()
+                    y_true=torch.cat(premise_labels).to(device).cpu(),
+                    y_pred=p1_predictions.cpu(),
+                    average="macro",
                 )
                 p2_f1 = f1_score(
-                    torch.cat(premise2_labels).to(device).cpu(), p2_predictions.cpu()
+                    y_true=torch.cat(premise2_labels).to(device).cpu(),
+                    y_pred=p2_predictions.cpu(),
+                    average="macro",
                 )
-                batch_metrics["generation_f1"] += (
-                    (p1_f1 + p2_f1) / 2 / 2
+                p1_f1_micro = f1_score(
+                    y_true=torch.cat(premise_labels).to(device).cpu(),
+                    y_pred=p1_predictions.cpu(),
+                    average="micro",
+                )
+                p2_f1_micro = f1_score(
+                    y_true=torch.cat(premise2_labels).to(device).cpu(),
+                    y_pred=p2_predictions.cpu(),
+                    average="micro",
+                )
+                batch_metrics["generation_f1"]["macro"] += (p1_f1 + p2_f1) / 2 / 2
+                batch_metrics["generation_f1"]["micro"] += (
+                    (p1_f1_micro + p2_f1_micro) / 2 / 2
                 )  # 因为会循环两次
 
             """
@@ -678,7 +700,12 @@ def eval_epoch(model, dataloader, task, device):
                 all_labels.extend(batch_metrics["labels"])
             if task == "generation" or task == "joint":
                 # 累积生成指标
-                generation_metrics["f1"] += batch_metrics["generation_f1"]
+                generation_metrics["f1_micro_gen"] += batch_metrics["generation_f1"][
+                    "micro"
+                ]
+                generation_metrics["f1_macro_gen"] += batch_metrics["generation_f1"][
+                    "macro"
+                ]
 
     # 计算平均损失
     for key in epoch_losses:
@@ -687,7 +714,8 @@ def eval_epoch(model, dataloader, task, device):
         # 计算分类指标
         classification_metrics = {
             "accuracy": accuracy_score(all_labels, all_predictions),
-            "f1": f1_score(all_labels, all_predictions, average="macro"),
+            "f1_macro_cli": f1_score(all_labels, all_predictions, average="macro"),
+            "f1_micro_cli": f1_score(all_labels, all_predictions, average="micro"),
             "precision": precision_score(all_labels, all_predictions, average="macro"),
             "recall": recall_score(all_labels, all_predictions, average="macro"),
         }
@@ -728,11 +756,11 @@ def main():
 
         config, train_dataset, dev_dataset, test_dataset = data_model_loader(device)
         config.device = device
-        config.save_dir = "checkpoints/experiment2"
+        config.save_dir = "checkpoints/experiment3"
         config.mode = "train"
         config.stage = "joint"
         config.epochs = 20
-        config.lr = 0.001
+        config.lr = 1e-3
         stage = config.stage
 
         train_loader = get_dataloader(train_dataset, config.batch_size)
@@ -760,8 +788,10 @@ def main():
         #     optimizer, mode="min", factor=0.1, patience=3
         # )
 
-        num_training_steps = len(train_loader) * config.epochs
+        num_training_steps = config.total_steps
+        logging.info(f"Total training steps: {num_training_steps}")
         num_warmup_steps = num_training_steps // 10
+        logging.info(f"Total warmup steps: {num_warmup_steps}")
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=num_warmup_steps,
@@ -795,6 +825,7 @@ def main():
                 task=config.stage,
                 device=device,
             )
+            logging.info(f"Epoch {epoch} finished")
             # 评估
             eval_results = eval_epoch(
                 model, dev_loader, task=config.stage, device=device
@@ -831,7 +862,9 @@ def main():
             if stage == "classification" and is_best_model(
                 eval_results, best_classification_f1, stage
             ):  # 分类任务，用f1指标
-                best_classification_f1 = eval_results["classification_metrics"]["f1"]
+                best_classification_f1 = eval_results["classification_metrics"][
+                    "f1_macro_cli"
+                ]
                 model_path = os.path.join(config.save_dir, f"best_{stage}_model.pt")
                 save_model(
                     model,
@@ -848,7 +881,7 @@ def main():
             elif stage == "generation" and is_best_model(
                 eval_results, best_generation_f1, stage
             ):
-                best_generation_f1 = eval_results["generation_metrics"]["f1"]
+                best_generation_f1 = eval_results["generation_metrics"]["f1_macro_gen"]
                 model_path = os.path.join(config.save_dir, f"best_{stage}_model.pt")
                 save_model(
                     model,
@@ -863,8 +896,8 @@ def main():
                 )
             elif stage == "joint" and is_best_model(eval_results, best_joint_f1, stage):
                 best_joint_f1 = (
-                    eval_results["generation_metrics"]["f1"] * 0.2
-                    + eval_results["classification_metrics"]["f1"] * 0.8
+                    eval_results["generation_metrics"]["f1_macro_gen"] * 0.2
+                    + eval_results["classification_metrics"]["f1_macro_cli"] * 0.8
                 )
                 model_path = os.path.join(config.save_dir, f"best_{stage}_model.pt")
                 save_model(
